@@ -8,7 +8,6 @@ dotenv.config();
 
 const app = express();
 const corsOptions = {
-  // Origin: This is the frontend URL that will be allowed to access the server.
   origin: ["http://localhost:5173/"],
 };
 
@@ -24,12 +23,33 @@ const db = mysql.createPool({
 // Allows us to parse JSON data in the request body.
 app.use(express.json());
 
-// Allows us to parse URL-encoded data (from HTML forms or URL-style strings). extended allows us to parse nested objects
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// Use the CORS middleware with the specific options we defined.
 app.use(cors(corsOptions));
 
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+// Register a new user
+app.post("/register", async (req, res) => {
+  const { name, email, password } = req.body;
+  if (
+    typeof name !== "string" ||
+    name.length === 0 ||
+    name.length > 255 ||
+    typeof email !== "string" ||
+    !isValidEmail(email) ||
+    email.length > 255 ||
+    typeof password !== "string" ||
+    password.length < 6 ||
+    password.length > 255
+  ) {
+    return res.status(400).json({ message: "Invalid input" });
+  }
+
+  try {
+    const [rows] = await db.query("SELECT id FROM login WHERE email = ?", [email]);
 // Register a new user
 app.post("/register", async (req, res) => {
   const { name, email, password } = req.body;
@@ -46,9 +66,13 @@ app.post("/register", async (req, res) => {
       return res.status(409).json({ message: "User already exists" });
     }
     const hashed = await bcrypt.hash(password, 10);
-    await db.query(
-      "INSERT INTO login (name, email, password) VALUES (?, ?, ?)",
+    const [result] = await db.query(
+      "INSERT INTO login (name, email, password, role) VALUES (?, ?, ?, 'user')",
       [name, email, hashed]
+    );
+    await db.query(
+      "INSERT INTO profile (user_id) VALUES (?)",
+      [result.insertId]
     );
     res.status(201).json({ message: "User registered" });
   } catch (err) {
@@ -60,13 +84,17 @@ app.post("/register", async (req, res) => {
 // Authenticate a user
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) {
-    return res.status(400).json({ message: "email and password required" });
+  if (
+    typeof email !== "string" ||
+    !isValidEmail(email) ||
+    typeof password !== "string" ||
+    password.length === 0
+  ) {
+    return res.status(400).json({ message: "Invalid input" });
   }
+
   try {
-    const [rows] = await db.query("SELECT * FROM login WHERE email = ?", [
-      email,
-    ]);
+    const [rows] = await db.query("SELECT * FROM login WHERE email = ?", [email]);
     if (rows.length === 0) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
@@ -75,10 +103,101 @@ app.post("/login", async (req, res) => {
     if (!match) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
-    res.json({ message: "Login successful" });
+    res.json({ message: "Login successful", userId: user.id, role: user.role });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error" });
   }
 });
+
+// Create or update user profile
+app.post("/profile", async (req, res) => {
+  const { userId, location, skills, preferences, availability } = req.body;
+  if (!userId) {
+    return res.status(400).json({ message: "userId required" });
+  }
+  if (
+    location && location.length > 255 ||
+    skills && skills.length > 255 ||
+    preferences && preferences.length > 1000 ||
+    availability && availability.length > 255
+  ) {
+    return res.status(400).json({ message: "Invalid field lengths" });
+  }
+  try {
+    await db.query(
+      `INSERT INTO profile (user_id, location, skills, preferences, availability)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE location = VALUES(location), skills = VALUES(skills), preferences = VALUES(preferences), availability = VALUES(availability)`,
+      [userId, location || null, skills || null, preferences || null, availability || null]
+    );
+    res.json({ message: "Profile saved" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Retrieve user profile
+app.get("/profile/:userId", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const [rows] = await db.query(
+      "SELECT user_id, location, skills, preferences, availability FROM profile WHERE user_id = ?",
+      [userId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "Profile not found" });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Admin: list all users
+app.get("/users", async (req, res) => {
+  try {
+    const [rows] = await db.query("SELECT id, name, email, role FROM login");
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Admin: update a user's role
+app.put("/users/:id/role", async (req, res) => {
+  const { id } = req.params;
+  const { role } = req.body;
+  if (!["user", "admin"].includes(role)) {
+    return res.status(400).json({ message: "Invalid role" });
+  }
+  try {
+    await db.query("UPDATE login SET role = ? WHERE id = ?", [role, id]);
+    res.json({ message: "Role updated" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Admin: update a user's password
+app.put("/users/:id/password", async (req, res) => {
+  const { id } = req.params;
+  const { password } = req.body;
+  if (typeof password !== "string" || password.length < 6 || password.length > 255) {
+    return res.status(400).json({ message: "Invalid password" });
+  }
+  try {
+    const hashed = await bcrypt.hash(password, 10);
+    await db.query("UPDATE login SET password = ? WHERE id = ?", [hashed, id]);
+    res.json({ message: "Password updated" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 export default app;

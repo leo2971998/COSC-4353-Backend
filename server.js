@@ -11,7 +11,6 @@ const corsOptions = {
   origin: ["http://localhost:5173/"],
 };
 
-// Create a connection pool to the MySQL database
 const db = mysql.createPool({
   host: process.env.DB_HOST || "104.10.143.45",
   port: 3306,
@@ -19,9 +18,6 @@ const db = mysql.createPool({
   password: process.env.DB_PASSWORD || "your_password",
   database: process.env.DB_NAME || "your_database",
 });
-
-// Allows us to parse JSON data in the request body.
-app.use(express.json());
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -35,44 +31,32 @@ function isValidEmail(email) {
 app.post("/register", async (req, res) => {
   const { name, email, password } = req.body;
   if (
-    typeof name !== "string" ||
-    name.length === 0 ||
-    name.length > 255 ||
-    typeof email !== "string" ||
-    !isValidEmail(email) ||
-    email.length > 255 ||
-    typeof password !== "string" ||
-    password.length < 6 ||
-    password.length > 255
+      typeof name !== "string" ||
+      name.length === 0 ||
+      name.length > 255 ||
+      typeof email !== "string" ||
+      !isValidEmail(email) ||
+      email.length > 255 ||
+      typeof password !== "string" ||
+      password.length < 6 ||
+      password.length > 255
   ) {
     return res.status(400).json({ message: "Invalid input" });
   }
 
   try {
     const [rows] = await db.query("SELECT id FROM login WHERE email = ?", [email]);
-// Register a new user
-app.post("/register", async (req, res) => {
-  const { name, email, password } = req.body;
-  if (!name || !email || !password) {
-    return res
-      .status(400)
-      .json({ message: "name, email and password required" });
-  }
-  try {
-    const [rows] = await db.query("SELECT id FROM login WHERE email = ?", [
-      email,
-    ]);
     if (rows.length > 0) {
       return res.status(409).json({ message: "User already exists" });
     }
     const hashed = await bcrypt.hash(password, 10);
     const [result] = await db.query(
-      "INSERT INTO login (name, email, password, role) VALUES (?, ?, ?, 'user')",
-      [name, email, hashed]
+        "INSERT INTO login (name, email, password, role) VALUES (?, ?, ?, 'user')",
+        [name, email, hashed]
     );
     await db.query(
-      "INSERT INTO profile (user_id) VALUES (?)",
-      [result.insertId]
+        "INSERT INTO profile (user_id) VALUES (?)",
+        [result.insertId]
     );
     res.status(201).json({ message: "User registered" });
   } catch (err) {
@@ -85,10 +69,10 @@ app.post("/register", async (req, res) => {
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
   if (
-    typeof email !== "string" ||
-    !isValidEmail(email) ||
-    typeof password !== "string" ||
-    password.length === 0
+      typeof email !== "string" ||
+      !isValidEmail(email) ||
+      typeof password !== "string" ||
+      password.length === 0
   ) {
     return res.status(400).json({ message: "Invalid input" });
   }
@@ -117,19 +101,19 @@ app.post("/profile", async (req, res) => {
     return res.status(400).json({ message: "userId required" });
   }
   if (
-    location && location.length > 255 ||
-    skills && skills.length > 255 ||
-    preferences && preferences.length > 1000 ||
-    availability && availability.length > 255
+      (location && location.length > 255) ||
+      (skills && skills.length > 255) ||
+      (preferences && preferences.length > 1000) ||
+      (availability && availability.length > 255)
   ) {
     return res.status(400).json({ message: "Invalid field lengths" });
   }
   try {
     await db.query(
-      `INSERT INTO profile (user_id, location, skills, preferences, availability)
-       VALUES (?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE location = VALUES(location), skills = VALUES(skills), preferences = VALUES(preferences), availability = VALUES(availability)`,
-      [userId, location || null, skills || null, preferences || null, availability || null]
+        `INSERT INTO profile (user_id, location, skills, preferences, availability)
+       VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY
+      UPDATE location = VALUES(location), skills = VALUES(skills), preferences = VALUES(preferences), availability = VALUES(availability)`,
+        [userId, location || null, skills || null, preferences || null, availability || null]
     );
     res.json({ message: "Profile saved" });
   } catch (err) {
@@ -143,8 +127,8 @@ app.get("/profile/:userId", async (req, res) => {
   const { userId } = req.params;
   try {
     const [rows] = await db.query(
-      "SELECT user_id, location, skills, preferences, availability FROM profile WHERE user_id = ?",
-      [userId]
+        "SELECT user_id, location, skills, preferences, availability FROM profile WHERE user_id = ?",
+        [userId]
     );
     if (rows.length === 0) {
       return res.status(404).json({ message: "Profile not found" });

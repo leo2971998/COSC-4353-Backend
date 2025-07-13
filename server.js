@@ -1,3 +1,6 @@
+// server.js  – run locally with:  node server.js
+// package.json should have  { "type": "module" }  if you want to keep import/export syntax.
+
 import express from "express";
 import cors from "cors";
 import mysql from "mysql2/promise";
@@ -8,57 +11,57 @@ dotenv.config();
 
 const app = express();
 
-// ════════════════════════════════════════════════════════════════════════════
-// CORS  (local Vite only for now)
-// ════════════════════════════════════════════════════════════════════════════
-const corsOptions = { origin: ["http://localhost:5173"] };
+// ───────────────────────────────────────────────────────────────
+// CORS  (local Vite dev server)
+// ───────────────────────────────────────────────────────────────
+const corsOptions = { origin: ["http://localhost:5173"] }; // ← no trailing slash
 app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // pre-flight
 
-// PRE-FLIGHT for *any* route   (use "/*"  → avoids path-to-regexp crash)
-app.options("/*", cors(corsOptions));
-
-// ════════════════════════════════════════════════════════════════════════════
-// MySQL  (connection pool + startup ping)
-// ════════════════════════════════════════════════════════════════════════════
+// ───────────────────────────────────────────────────────────────
+// MySQL pool  +  connectivity check
+// ───────────────────────────────────────────────────────────────
 const db = mysql.createPool({
-  host: process.env.DB_HOST || "104.10.143.45",
-  port: 3306,
-  user: process.env.DB_USER || "your_username",
+  host:     process.env.DB_HOST     || "104.10.143.45",
+  port:     3306,
+  user:     process.env.DB_USER     || "your_username",
   password: process.env.DB_PASSWORD || "your_password",
-  database: process.env.DB_NAME || "your_database",
+  database: process.env.DB_NAME     || "your_database",
   connectionLimit: 5,
 });
 
+// Ping once to verify connectivity
 (async () => {
   try {
     const conn = await db.getConnection();
     await conn.ping();
-    console.log("✅  MySQL pool ready (ping OK)");
+    console.log("✅  MySQL connection pool ready (ping OK)");
     conn.release();
   } catch (err) {
     console.error("❌  MySQL connection failed:", err.message);
+    // Optionally:   process.exit(1);
   }
 })();
 
-// ════════════════════════════════════════════════════════════════════════════
-// Middleware
-// ════════════════════════════════════════════════════════════════════════════
+// ───────────────────────────────────────────────────────────────
+// Express middleware
+// ───────────────────────────────────────────────────────────────
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
-// ════════════════════════════════════════════════════════════════════════════
+// ───────────────────────────────────────────────────────────────
 // Routes
-// ════════════════════════════════════════════════════════════════════════════
+// ───────────────────────────────────────────────────────────────
 
-// ── Register ────────────────────────────────────────────────────────────────
+// Register
 app.post("/register", async (req, res) => {
   const { name, email, password } = req.body;
   if (
-    typeof name !== "string"      || !name.trim()      || name.length  > 255 ||
-    typeof email !== "string"     || !isValidEmail(email) || email.length > 255 ||
-    typeof password !== "string"  || password.length < 6 || password.length > 255
+      typeof name !== "string"  || !name.trim()      || name.length  > 255 ||
+      typeof email !== "string" || !isValidEmail(email)               || email.length > 255 ||
+      typeof password !== "string" || password.length < 6 || password.length > 255
   ) {
     return res.status(400).json({ message: "Invalid input" });
   }
@@ -71,13 +74,12 @@ app.post("/register", async (req, res) => {
 
     const hashed = await bcrypt.hash(password, 10);
     const [result] = await db.query(
-      "INSERT INTO login (name, email, password) VALUES (?, ?, ?)",
-      [name, email, hashed]
+        "INSERT INTO login (name, email, password) VALUES (?, ?, ?)",
+        [name, email, hashed]
     );
-
     await db.query("INSERT INTO profile (user_id) VALUES (?)", [result.insertId]);
-    console.log("Inserted user id:", result.insertId);
 
+    console.log("Inserted user id:", result.insertId);
     res.status(201).json({ message: "User registered" });
   } catch (err) {
     console.error("Register error:", err);
@@ -85,12 +87,12 @@ app.post("/register", async (req, res) => {
   }
 });
 
-// ── Login ───────────────────────────────────────────────────────────────────
+// Login
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
   if (
-    typeof email !== "string"    || !isValidEmail(email) ||
-    typeof password !== "string" || !password
+      typeof email !== "string"    || !isValidEmail(email) ||
+      typeof password !== "string" || !password
   ) {
     return res.status(400).json({ message: "Invalid input" });
   }
@@ -110,30 +112,31 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// ── Create / update profile ────────────────────────────────────────────────
+// Create / update profile
 app.post("/profile", async (req, res) => {
   const { userId, location, skills, preferences, availability } = req.body;
-  if (!userId) return res.status(400).json({ message: "userId required" });
+  if (!userId)
+    return res.status(400).json({ message: "userId required" });
 
   if (
-    (location     && location.length     > 255) ||
-    (skills       && skills.length       > 255) ||
-    (preferences  && preferences.length  > 1000)||
-    (availability && availability.length > 255)
+      (location     && location.length     > 255) ||
+      (skills       && skills.length       > 255) ||
+      (preferences  && preferences.length  > 1000)||
+      (availability && availability.length > 255)
   ) {
     return res.status(400).json({ message: "Invalid field lengths" });
   }
 
   try {
     await db.query(
-      `INSERT INTO profile (user_id, location, skills, preferences, availability)
+        `INSERT INTO profile (user_id, location, skills, preferences, availability)
          VALUES (?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           location     = VALUES(location),
-           skills       = VALUES(skills),
-           preferences  = VALUES(preferences),
-           availability = VALUES(availability)`,
-      [userId, location || null, skills || null, preferences || null, availability || null]
+           ON DUPLICATE KEY UPDATE
+                              location     = VALUES(location),
+                              skills       = VALUES(skills),
+                              preferences  = VALUES(preferences),
+                              availability = VALUES(availability)`,
+        [userId, location || null, skills || null, preferences || null, availability || null]
     );
     res.json({ message: "Profile saved" });
   } catch (err) {
@@ -142,12 +145,12 @@ app.post("/profile", async (req, res) => {
   }
 });
 
-// ── Retrieve profile ───────────────────────────────────────────────────────
+// Retrieve profile
 app.get("/profile/:userId", async (req, res) => {
   try {
     const [rows] = await db.query(
-      "SELECT user_id, location, skills, preferences, availability FROM profile WHERE user_id = ?",
-      [req.params.userId]
+        "SELECT user_id, location, skills, preferences, availability FROM profile WHERE user_id = ?",
+        [req.params.userId]
     );
     if (!rows.length) return res.status(404).json({ message: "Profile not found" });
     res.json(rows[0]);
@@ -157,7 +160,7 @@ app.get("/profile/:userId", async (req, res) => {
   }
 });
 
-// ── Admin helpers ──────────────────────────────────────────────────────────
+// Admin utilities
 app.get("/users", async (_req, res) => {
   try {
     const [rows] = await db.query("SELECT id, name, email, role FROM login");
@@ -197,7 +200,4 @@ app.put("/users/:id/password", async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════════════════════════
-//  NO app.listen() – Vercel adds the listener for you.
-// ════════════════════════════════════════════════════════════════════════════
 export default app;

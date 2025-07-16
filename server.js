@@ -109,9 +109,15 @@ app.post("/login", async (req, res) => {
             "SELECT is_complete FROM profile WHERE user_id = ?",
             [user.id]
         );
-        const profileComplete = profileRows.length && profileRows[0].is_complete === 1;
+        const profileComplete =
+            profileRows.length && profileRows[0].is_complete === 1;
 
-        res.json({ message: "Login successful", userId: user.id, profileComplete });
+        res.json({
+            message: "Login successful",
+            userId: user.id,
+            role: user.role,
+            profileComplete,
+        });
     } catch (err) {
         console.error("Login error:", err);
         res.status(500).json({ message: "Server error" });
@@ -150,17 +156,17 @@ app.post("/profile", async (req, res) => {
     try {
         await db.query(
             `INSERT INTO profile (user_id, address1, address2, city, state, zip_code, skills, preferences, availability, is_complete)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-                 ON DUPLICATE KEY UPDATE
-                                      address1     = VALUES(address1),
-                                      address2     = VALUES(address2),
-                                      city         = VALUES(city),
-                                      state        = VALUES(state),
-                                      zip_code     = VALUES(zip_code),
-                                      skills       = VALUES(skills),
-                                      preferences  = VALUES(preferences),
-                                      availability = VALUES(availability),
-                                      is_complete  = 1`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+           ON DUPLICATE KEY UPDATE
+                              address1     = VALUES(address1),
+                              address2     = VALUES(address2),
+                              city         = VALUES(city),
+                              state        = VALUES(state),
+                              zip_code     = VALUES(zip_code),
+                              skills       = VALUES(skills),
+                              preferences  = VALUES(preferences),
+                              availability = VALUES(availability),
+                              is_complete  = 1`,
             [
                 userId,
                 address1 || null,

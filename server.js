@@ -57,25 +57,29 @@ const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
 // Register
 app.post("/register", async (req, res) => {
-    const { name, email, password } = req.body;
+    const { fullName, name, email, password } = req.body;
+    const actualName = (typeof fullName === "string" && fullName.trim()) 
+        ? fullName.trim() 
+        : (typeof name === "string" ? name.trim() : "");
+
     if (
-        typeof name !== "string"  || !name.trim()      || name.length  > 255 ||
-        typeof email !== "string" || !isValidEmail(email)               || email.length > 255 ||
+        !actualName || actualName.length > 255 ||
+        typeof email !== "string" || !isValidEmail(email) || email.length > 255 ||
         typeof password !== "string" || password.length < 6 || password.length > 255
     ) {
         return res.status(400).json({ message: "Invalid input" });
     }
 
     try {
-        console.log("Register attempt:", { name, email });
+        console.log("Register attempt:", { fullName: actualName, email });
 
         const [dup] = await db.query("SELECT id FROM login WHERE email = ?", [email]);
         if (dup.length) return res.status(409).json({ message: "User already exists" });
 
         const hashed = await bcrypt.hash(password, 10);
         const [result] = await db.query(
-            "INSERT INTO login (name, email, password) VALUES (?, ?, ?)",
-            [name, email, hashed]
+            "INSERT INTO login (full_name, email, password) VALUES (?, ?, ?)",
+            [actualName, email, hashed]
         );
         await db.query("INSERT INTO profile (user_id) VALUES (?)", [result.insertId]);
 
@@ -86,7 +90,6 @@ app.post("/register", async (req, res) => {
         res.status(500).json({ message: "Server error" });
     }
 });
-
 // Login
 app.post("/login", async (req, res) => {
     const { email, password } = req.body;
@@ -113,10 +116,11 @@ app.post("/login", async (req, res) => {
             profileRows.length && profileRows[0].is_complete === 1;
 
         res.json({
-            message: "Login successful",
-            userId: user.id,
-            role: user.role,
-            profileComplete,
+        message: "Login successful",
+        userId: user.id,
+        role: user.role,
+        fullName: user.full_name,   // ← add
+        profileComplete,
         });
     } catch (err) {
         console.error("Login error:", err);
@@ -124,10 +128,11 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// Create / update profile
+// Create / update profile  (REPLACE THIS HANDLER)
 app.post("/profile", async (req, res) => {
     const {
         userId,
+        fullName,        // optional name update
         address1,
         address2,
         city,
@@ -137,10 +142,13 @@ app.post("/profile", async (req, res) => {
         preferences,
         availability,
     } = req.body;
-    if (!userId)
+
+    if (!userId) {
         return res.status(400).json({ message: "userId required" });
+    }
 
     if (
+        (typeof fullName === "string" && fullName.trim().length > 255) ||
         (address1    && address1.length    > 100) ||
         (address2    && address2.length    > 100) ||
         (city        && city.length        > 100) ||
@@ -154,19 +162,27 @@ app.post("/profile", async (req, res) => {
     }
 
     try {
+        // Optional full name update in login table
+        if (typeof fullName === "string" && fullName.trim()) {
+            await db.query(
+                "UPDATE login SET full_name = ? WHERE id = ?",
+                [fullName.trim(), userId]
+            );
+        }
+
         await db.query(
             `INSERT INTO profile (user_id, address1, address2, city, state, zip_code, skills, preferences, availability, is_complete)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-           ON DUPLICATE KEY UPDATE
-                              address1     = VALUES(address1),
-                              address2     = VALUES(address2),
-                              city         = VALUES(city),
-                              state        = VALUES(state),
-                              zip_code     = VALUES(zip_code),
-                              skills       = VALUES(skills),
-                              preferences  = VALUES(preferences),
-                              availability = VALUES(availability),
-                              is_complete  = 1`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+             ON DUPLICATE KEY UPDATE
+                 address1     = VALUES(address1),
+                 address2     = VALUES(address2),
+                 city         = VALUES(city),
+                 state        = VALUES(state),
+                 zip_code     = VALUES(zip_code),
+                 skills       = VALUES(skills),
+                 preferences  = VALUES(preferences),
+                 availability = VALUES(availability),
+                 is_complete  = 1`,
             [
                 userId,
                 address1 || null,
@@ -186,12 +202,25 @@ app.post("/profile", async (req, res) => {
     }
 });
 
-// Retrieve profile
+// Retrieve profile  (REPLACE THIS HANDLER)
 app.get("/profile/:userId", async (req, res) => {
     try {
         const [rows] = await db.query(
-            `SELECT user_id, address1, address2, city, state, zip_code, skills, preferences, availability, is_complete
-             FROM profile WHERE user_id = ?`,
+            `SELECT 
+                 p.user_id,
+                 l.full_name AS fullName,
+                 p.address1,
+                 p.address2,
+                 p.city,
+                 p.state,
+                 p.zip_code AS zipCode,
+                 p.skills,
+                 p.preferences,
+                 p.availability,
+                 p.is_complete AS isComplete
+             FROM profile p
+             JOIN login l ON p.user_id = l.id
+             WHERE p.user_id = ?`,
             [req.params.userId]
         );
         if (!rows.length) return res.status(404).json({ message: "Profile not found" });
@@ -201,11 +230,12 @@ app.get("/profile/:userId", async (req, res) => {
         res.status(500).json({ message: "Server error" });
     }
 });
-
-// Admin utilities
+// Admin utilities: list users  (REPLACE THIS HANDLER)
 app.get("/users", async (_req, res) => {
     try {
-        const [rows] = await db.query("SELECT id, name, email, role FROM login");
+        const [rows] = await db.query(
+            "SELECT id, full_name AS fullName, email, role FROM login"
+        );
         res.json(rows);
     } catch (err) {
         console.error("Users list error:", err);

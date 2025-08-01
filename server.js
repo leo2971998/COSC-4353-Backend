@@ -6,10 +6,6 @@ import cors from "cors";
 import mysql from "mysql2/promise";
 import bcrypt from "bcryptjs";
 import dotenv from "dotenv";
-import eventRoutes from "./routes/eventRoutes.js";
-import matchRoutes from "./routes/match.js";
-import notificationRoutes from './routes/notifications.js';
-import historyRoutes from "./routes/historyRoutes.js";
 dotenv.config();
 
 const app = express();

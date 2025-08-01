@@ -29,6 +29,7 @@ const db = mysql.createPool({
   connectionLimit: 5,
 });
 
+// Ping once to verify connectivity
 (async () => {
   try {
     const conn = await db.getConnection();
@@ -37,6 +38,7 @@ const db = mysql.createPool({
     conn.release();
   } catch (err) {
     console.error("❌  MySQL connection failed:", err.message);
+    // Optionally:   process.exit(1);
   }
 })();
 
@@ -48,18 +50,21 @@ app.use(express.urlencoded({ extended: true }));
 
 const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
-// ───────────────────────────────────────────────────────────────
-// Auth & profile endpoints
-// ───────────────────────────────────────────────────────────────
+
+// Starts the server on port 3000 by default
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server is running on http://localhost:${PORT}`);
+});
 
 // Register
 app.post("/register", async (req, res) => {
-  const { name, email, password } = req.body;
-
+  const { fullName, name, email, password } = req.body;
+  const finalName = fullName || name;
   if (
-    typeof name !== "string" ||
-    !name.trim() ||
-    name.length > 255 ||
+    typeof finalName !== "string" ||
+    !finalName.trim() ||
+    finalName.length > 255 ||
     typeof email !== "string" ||
     !isValidEmail(email) ||
     email.length > 255 ||
@@ -71,19 +76,22 @@ app.post("/register", async (req, res) => {
   }
 
   try {
-    console.log("Register attempt:", { name, email });
+    console.log("Register attempt:", { name: finalName, email });
 
     const [dup] = await db.query("SELECT id FROM login WHERE email = ?", [
       email,
     ]);
-    if (dup.length) return res.status(409).json({ message: "User already exists" });
+    if (dup.length)
+      return res.status(409).json({ message: "User already exists" });
 
     const hashed = await bcrypt.hash(password, 10);
     const [result] = await db.query(
-      "INSERT INTO login (name, email, password) VALUES (?, ?, ?)",
-      [name, email, hashed]
+      "INSERT INTO login (full_name, email, password) VALUES (?, ?, ?)",
+      [finalName, email, hashed]
     );
-    await db.query("INSERT INTO profile (user_id) VALUES (?)", [result.insertId]);
+    await db.query("INSERT INTO profile (user_id) VALUES (?)", [
+      result.insertId,
+    ]);
 
     console.log("Inserted user id:", result.insertId);
     res.status(201).json({ message: "User registered" });
@@ -96,7 +104,6 @@ app.post("/register", async (req, res) => {
 // Login
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
-
   if (
     typeof email !== "string" ||
     !isValidEmail(email) ||
@@ -107,8 +114,11 @@ app.post("/login", async (req, res) => {
   }
 
   try {
-    const [rows] = await db.query("SELECT * FROM login WHERE email = ?", [email]);
-    if (!rows.length) return res.status(401).json({ message: "Invalid credentials" });
+    const [rows] = await db.query("SELECT * FROM login WHERE email = ?", [
+      email,
+    ]);
+    if (!rows.length)
+      return res.status(401).json({ message: "Invalid credentials" });
 
     const user = rows[0];
     const ok = await bcrypt.compare(password, user.password);
@@ -118,13 +128,15 @@ app.post("/login", async (req, res) => {
       "SELECT is_complete FROM profile WHERE user_id = ?",
       [user.id]
     );
-    const profileComplete = profileRows.length && profileRows[0].is_complete === 1;
+    const profileComplete =
+      profileRows.length && profileRows[0].is_complete === 1;
 
     res.json({
       message: "Login successful",
       userId: user.id,
       role: user.role,
       profileComplete,
+      fullName: user.full_name ?? user.name ?? null,
     });
   } catch (err) {
     console.error("Login error:", err);
@@ -136,6 +148,7 @@ app.post("/login", async (req, res) => {
 app.post("/profile", async (req, res) => {
   const {
     userId,
+    fullName,
     address1,
     address2,
     city,
@@ -145,7 +158,6 @@ app.post("/profile", async (req, res) => {
     preferences,
     availability,
   } = req.body;
-
   if (!userId) return res.status(400).json({ message: "userId required" });
 
   if (
@@ -163,13 +175,17 @@ app.post("/profile", async (req, res) => {
 
   try {
     await db.query(
-      `INSERT INTO profile (user_id, address1, address2, city, state, zip_code, skills, preferences, availability, is_complete)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-       ON DUPLICATE KEY UPDATE
-         address1=VALUES(address1), address2=VALUES(address2), city=VALUES(city),
-         state=VALUES(state), zip_code=VALUES(zip_code), skills=VALUES(skills),
-         preferences=VALUES(preferences), availability=VALUES(availability),
-         is_complete=1`,
+      `INSERT INTO profile (user_id, address1, address2, city, state, zip_code, preferences, availability, is_complete)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+           ON DUPLICATE KEY UPDATE
+                              address1     = VALUES(address1),
+                              address2     = VALUES(address2),
+                              city         = VALUES(city),
+                              state        = VALUES(state),
+                              zip_code     = VALUES(zip_code),
+                              preferences  = VALUES(preferences),
+                              availability = VALUES(availability),
+                              is_complete  = 1`,
       [
         userId,
         address1 || null,
@@ -177,11 +193,31 @@ app.post("/profile", async (req, res) => {
         city || null,
         state || null,
         zipCode || null,
-        skills || null,
         preferences || null,
         availability || null,
       ]
     );
+
+    if (fullName) {
+      await db.query("UPDATE login SET full_name = ? WHERE id = ?", [fullName, userId]);
+    }
+
+    await db.query("DELETE FROM profile_skill WHERE user_id = ?", [userId]);
+    const skillNames = Array.isArray(skills)
+        ? skills
+        : (skills || "").split(/,\s*/).filter((s) => s);
+    for (const name of skillNames) {
+      let [rows] = await db.query("SELECT skill_id FROM skill WHERE skill_name = ?", [name]);
+      let sid;
+      if (rows.length) {
+        sid = rows[0].skill_id;
+      } else {
+        const [res2] = await db.query("INSERT INTO skill (skill_name) VALUES (?)", [name]);
+        sid = res2.insertId;
+      }
+      await db.query("INSERT INTO profile_skill (user_id, skill_id) VALUES (?, ?)", [userId, sid]);
+    }
+
     res.json({ message: "Profile saved" });
   } catch (err) {
     console.error("Profile save error:", err);
@@ -193,17 +229,58 @@ app.post("/profile", async (req, res) => {
 app.get("/profile/:userId", async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT user_id, address1, address2, city, state, zip_code,
-              skills, preferences, availability, is_complete
-       FROM profile WHERE user_id = ?`,
+      `SELECT p.user_id,
+              l.full_name,
+              p.address1,
+              p.address2,
+              p.city,
+              p.state,
+              p.zip_code,
+              GROUP_CONCAT(s.skill_name ORDER BY s.skill_name) AS skills,
+              p.preferences,
+              p.availability,
+              p.is_complete
+         FROM profile p
+         JOIN login l ON l.id = p.user_id
+         LEFT JOIN profile_skill ps ON ps.user_id = p.user_id
+         LEFT JOIN skill s ON s.skill_id = ps.skill_id
+        WHERE p.user_id = ?
+        GROUP BY p.user_id`,
       [req.params.userId]
     );
-
-    if (!rows.length) return res.status(404).json({ message: "Profile not found" });
-
-    res.json(rows[0]);
+    if (!rows.length)
+      return res.status(404).json({ message: "Profile not found" });
+    const row = rows[0];
+    const skills = row.skills ? row.skills.split(/,\s*/) : [];
+    res.json({
+      user_id: row.user_id,
+      fullName: row.full_name,
+      address1: row.address1,
+      address2: row.address2,
+      city: row.city,
+      state: row.state,
+      zipCode: row.zip_code,
+      skills,
+      preferences: row.preferences,
+      availability: row.availability,
+      is_complete: row.is_complete,
+    });
   } catch (err) {
     console.error("Profile fetch error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// List all skills
+app.get("/skills", async (_req, res) => {
+  try {
+    const [rows] = await db.query(
+      "SELECT skill_name FROM skill ORDER BY skill_name"
+    );
+    const names = rows.map(r => r.skill_name);
+    res.json(names);
+  } catch (err) {
+    console.error("Skills fetch error:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -212,7 +289,8 @@ app.get("/profile/:userId", async (req, res) => {
 app.get("/users", async (_req, res) => {
   try {
     const [rows] = await db.query(
-      "SELECT id, full_name AS name, email, role FROM login"
+        "SELECT id, full_name AS name, email, role FROM login"
+        //                ^^^^^^^^^^^^^^^ alias keeps front-end unchanged
     );
     res.json(rows);
   } catch (err) {
@@ -220,7 +298,6 @@ app.get("/users", async (_req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
 app.put("/users/:id/role", async (req, res) => {
   const { role } = req.body;
   if (!["user", "admin"].includes(role))
@@ -240,14 +317,12 @@ app.put("/users/:id/role", async (req, res) => {
 
 app.put("/users/:id/password", async (req, res) => {
   const { password } = req.body;
-
   if (
     typeof password !== "string" ||
     password.length < 6 ||
     password.length > 255
-  ) {
+  )
     return res.status(400).json({ message: "Invalid password" });
-  }
 
   try {
     const hashed = await bcrypt.hash(password, 10);
@@ -271,14 +346,6 @@ app.delete("/users/:id", async (req, res) => {
     console.error("User delete error:", err);
     res.status(500).json({ message: "Server error" });
   }
-});
-
-// ───────────────────────────────────────────────────────────────
-// Start server
-// ───────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
 });
 
 export default app;

@@ -1,3 +1,5 @@
+// Leo Nguyen - 2234488 - (description)
+
 // server.js  – run locally with:  node server.js
 // package.json should have  { "type": "module" }  if you want to keep import/export syntax.
 
@@ -7,6 +9,9 @@ import mysql from "mysql2/promise";
 import bcrypt from "bcryptjs";
 import dotenv from "dotenv";
 dotenv.config();
+
+// Leo Nguyen - 2234488 - import event feature router
+import eventRoutes from "./routes/eventRoutes.js";
 
 const app = express();
 
@@ -47,6 +52,9 @@ const db = mysql.createPool({
 // ───────────────────────────────────────────────────────────────
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Leo Nguyen - 2234488 - mount event routes
+app.use(eventRoutes);
 
 const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
@@ -344,6 +352,27 @@ app.delete("/users/:id", async (req, res) => {
     res.json({ message: "User deleted" });
   } catch (err) {
     console.error("User delete error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Leo Nguyen - 2234488 - volunteer dashboard “next event” endpoint
+app.get("/volunteer-dashboard/:userId", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const [rows] = await db.query(
+      `SELECT e.*
+         FROM eventManage            e
+         JOIN event_volunteer_link   l  ON l.event_id = e.event_id
+        WHERE l.user_id = ?
+          AND e.start_time > NOW()
+        ORDER BY e.start_time
+        LIMIT 1`,
+      [userId]
+    );
+    res.json({ next_event: rows });
+  } catch (err) {
+    console.error("Next-event fetch error:", err);
     res.status(500).json({ message: "Server error" });
   }
 });

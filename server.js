@@ -1,7 +1,6 @@
-// Leo Nguyen - 2234488 - (description)
-
-// server.js  – run locally with:  node server.js
-// package.json should have  { "type": "module" }  if you want to keep import/export syntax.
+// Leo Nguyen - 2234488 - all-in-one server.js
+// Run locally with:  node server.js
+// package.json should have  { "type": "module" }
 
 import express from "express";
 import cors from "cors";
@@ -10,21 +9,18 @@ import bcrypt from "bcryptjs";
 import dotenv from "dotenv";
 dotenv.config();
 
-// Leo Nguyen - 2234488 - import event feature router
-import eventRoutes from "./routes/eventRoutes.js";
-
 const app = express();
 
-// ───────────────────────────────────────────────────────────────
-// CORS  (local Vite dev server)
-// ───────────────────────────────────────────────────────────────
-const corsOptions = { origin: ["http://localhost:5173"] }; // ← no trailing slash
+/* ──────────────────────────────────────────────────────────
+   CORS
+   ────────────────────────────────────────────────────────── */
+const corsOptions = { origin: ["http://localhost:5173"] }; // ← add prod origin if needed
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // pre-flight
+app.options("*", cors(corsOptions));
 
-// ───────────────────────────────────────────────────────────────
-// MySQL pool  +  connectivity check
-// ───────────────────────────────────────────────────────────────
+/* ──────────────────────────────────────────────────────────
+   MySQL pool  +  connectivity check
+   ────────────────────────────────────────────────────────── */
 const db = mysql.createPool({
   host: process.env.DB_HOST || "192.168.1.198",
   port: 3306,
@@ -33,8 +29,6 @@ const db = mysql.createPool({
   database: process.env.DB_NAME || "COSC4353",
   connectionLimit: 5,
 });
-
-// Ping once to verify connectivity
 (async () => {
   try {
     const conn = await db.getConnection();
@@ -43,21 +37,78 @@ const db = mysql.createPool({
     conn.release();
   } catch (err) {
     console.error("❌  MySQL connection failed:", err.message);
-    // Optionally:   process.exit(1);
   }
 })();
 
-// ───────────────────────────────────────────────────────────────
-// Express middleware
-// ───────────────────────────────────────────────────────────────
+/* ──────────────────────────────────────────────────────────
+   Express middleware
+   ────────────────────────────────────────────────────────── */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Leo Nguyen - 2234488 - mount event routes
-app.use(eventRoutes);
+/* ──────────────────────────────────────────────────────────
+   EVENTS API  (built-in – no separate routes file)
+   ────────────────────────────────────────────────────────── */
+let eventsCache = []; // fallback for dev / DB outage
 
+// GET  /events  – calendar & dashboard use this
+app.get("/events", async (_req, res) => {
+  try {
+    const sql = `SELECT event_id, event_name, event_description,
+                        event_location, urgency, start_time, end_time
+                   FROM eventManage`;
+    const [events] = await db.query(sql);
+    eventsCache = events;               // refresh cache
+    res.json({ events });
+  } catch (err) {
+    console.error("Error fetching events:", err.message);
+    if (eventsCache.length) return res.json({ events: eventsCache });
+    res.status(500).json({ message: "Error fetching events" });
+  }
+});
+
+// POST /events – create a new event
+app.post("/events", async (req, res) => {
+  const {
+    event_name,
+    event_description,
+    event_location,
+    urgency,
+    start_time,
+    end_time,
+  } = req.body;
+
+  if (!event_name || !start_time || !end_time) {
+    return res
+      .status(400)
+      .json({ message: "event_name, start_time, end_time required" });
+  }
+
+  try {
+    const sql = `INSERT INTO eventManage
+                   (event_name, event_description, event_location,
+                    urgency, start_time, end_time)
+                 VALUES (?, ?, ?, ?, ?, ?)`;
+    const [result] = await db.query(sql, [
+      event_name,
+      event_description ?? null,
+      event_location ?? null,
+      urgency ?? null,
+      start_time,
+      end_time,
+    ]);
+    const newEvent = { event_id: result.insertId, ...req.body };
+    res.status(201).json({ message: "Event created", event: newEvent });
+  } catch (err) {
+    console.error("Error creating event:", err.message);
+    res.status(500).json({ message: "Error creating event" });
+  }
+});
+
+/* ──────────────────────────────────────────────────────────
+   ORIGINAL AUTH / PROFILE / ADMIN CODE  (unchanged)
+   ────────────────────────────────────────────────────────── */
 const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
-
 
 // Starts the server on port 3000 by default
 const PORT = process.env.PORT || 3000;
@@ -184,16 +235,16 @@ app.post("/profile", async (req, res) => {
   try {
     await db.query(
       `INSERT INTO profile (user_id, address1, address2, city, state, zip_code, preferences, availability, is_complete)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-           ON DUPLICATE KEY UPDATE
-                              address1     = VALUES(address1),
-                              address2     = VALUES(address2),
-                              city         = VALUES(city),
-                              state        = VALUES(state),
-                              zip_code     = VALUES(zip_code),
-                              preferences  = VALUES(preferences),
-                              availability = VALUES(availability),
-                              is_complete  = 1`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ON DUPLICATE KEY UPDATE
+             address1     = VALUES(address1),
+             address2     = VALUES(address2),
+             city         = VALUES(city),
+             state        = VALUES(state),
+             zip_code     = VALUES(zip_code),
+             preferences  = VALUES(preferences),
+             availability = VALUES(availability),
+             is_complete  = 1`,
       [
         userId,
         address1 || null,
@@ -207,23 +258,35 @@ app.post("/profile", async (req, res) => {
     );
 
     if (fullName) {
-      await db.query("UPDATE login SET full_name = ? WHERE id = ?", [fullName, userId]);
+      await db.query("UPDATE login SET full_name = ? WHERE id = ?", [
+        fullName,
+        userId,
+      ]);
     }
 
     await db.query("DELETE FROM profile_skill WHERE user_id = ?", [userId]);
     const skillNames = Array.isArray(skills)
-        ? skills
-        : (skills || "").split(/,\s*/).filter((s) => s);
+      ? skills
+      : (skills || "").split(/,\s*/).filter((s) => s);
     for (const name of skillNames) {
-      let [rows] = await db.query("SELECT skill_id FROM skill WHERE skill_name = ?", [name]);
+      let [rows] = await db.query(
+        "SELECT skill_id FROM skill WHERE skill_name = ?",
+        [name]
+      );
       let sid;
       if (rows.length) {
         sid = rows[0].skill_id;
       } else {
-        const [res2] = await db.query("INSERT INTO skill (skill_name) VALUES (?)", [name]);
+        const [res2] = await db.query(
+          "INSERT INTO skill (skill_name) VALUES (?)",
+          [name]
+        );
         sid = res2.insertId;
       }
-      await db.query("INSERT INTO profile_skill (user_id, skill_id) VALUES (?, ?)", [userId, sid]);
+      await db.query(
+        "INSERT INTO profile_skill (user_id, skill_id) VALUES (?, ?)",
+        [userId, sid]
+      );
     }
 
     res.json({ message: "Profile saved" });
@@ -285,7 +348,7 @@ app.get("/skills", async (_req, res) => {
     const [rows] = await db.query(
       "SELECT skill_name FROM skill ORDER BY skill_name"
     );
-    const names = rows.map(r => r.skill_name);
+    const names = rows.map((r) => r.skill_name);
     res.json(names);
   } catch (err) {
     console.error("Skills fetch error:", err);
@@ -297,8 +360,7 @@ app.get("/skills", async (_req, res) => {
 app.get("/users", async (_req, res) => {
   try {
     const [rows] = await db.query(
-        "SELECT id, full_name AS name, email, role FROM login"
-        //                ^^^^^^^^^^^^^^^ alias keeps front-end unchanged
+      "SELECT id, full_name AS name, email, role FROM login"
     );
     res.json(rows);
   } catch (err) {
@@ -322,7 +384,6 @@ app.put("/users/:id/role", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
 app.put("/users/:id/password", async (req, res) => {
   const { password } = req.body;
   if (
@@ -344,7 +405,6 @@ app.put("/users/:id/password", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
 app.delete("/users/:id", async (req, res) => {
   try {
     await db.query("DELETE FROM profile WHERE user_id = ?", [req.params.id]);
@@ -356,15 +416,15 @@ app.delete("/users/:id", async (req, res) => {
   }
 });
 
-// Leo Nguyen - 2234488 - volunteer dashboard “next event” endpoint
+// Volunteer dashboard – next confirmed event
 app.get("/volunteer-dashboard/:userId", async (req, res) => {
   const { userId } = req.params;
   try {
     const [rows] = await db.query(
       `SELECT e.*
-         FROM eventManage            e
-         JOIN event_volunteer_link   l  ON l.event_id = e.event_id
-        WHERE l.user_id = ?
+         FROM eventManage          e
+         JOIN event_volunteer_link v ON v.event_id = e.event_id
+        WHERE v.user_id  = ?
           AND e.start_time > NOW()
         ORDER BY e.start_time
         LIMIT 1`,

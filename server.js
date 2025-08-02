@@ -3,9 +3,6 @@ import cors from "cors";
 import mysql from "mysql2/promise";
 import bcrypt from "bcryptjs";
 import dotenv from "dotenv";
-import { volunteers } from "./data/volunteers.js";
-import { events as staticEvents } from "./data/events.js";
-import { notifications, addNotification } from "./data/notifications.js";
 dotenv.config();
 
 const app = express();

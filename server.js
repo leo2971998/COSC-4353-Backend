@@ -54,9 +54,20 @@ let eventsCache = []; // fallback for dev / DB outage
 // GET  /events  – calendar & dashboard use this
 app.get("/events", async (_req, res) => {
   try {
-    const sql = `SELECT event_id, event_name, event_description,
-                        event_location, urgency, start_time, end_time
-                   FROM eventManage`;
+    /* Leo Nguyen - 2234488 - include required skills via GROUP_CONCAT */
+    const sql = `
+      SELECT e.event_id,
+             e.event_name,
+             e.event_description,
+             e.event_location,
+             e.urgency,
+             e.start_time,
+             e.end_time,
+             GROUP_CONCAT(s.skill_name ORDER BY s.skill_name) AS required_skills
+        FROM eventManage      e
+        LEFT JOIN event_skill es ON es.event_id = e.event_id
+        LEFT JOIN skill       s  ON s.skill_id  = es.skill_id
+       GROUP BY e.event_id`;
     const [events] = await db.query(sql);
     eventsCache = events;               // refresh cache
     res.json({ events });
@@ -416,16 +427,28 @@ app.delete("/users/:id", async (req, res) => {
   }
 });
 
-// Volunteer dashboard – next confirmed event
+/* ──────────────────────────────────────────────────────────
+   Volunteer dashboard – next confirmed event
+   ────────────────────────────────────────────────────────── */
 app.get("/volunteer-dashboard/:userId", async (req, res) => {
   const { userId } = req.params;
   try {
+    /* Leo Nguyen - 2234488 - include required skills */
     const [rows] = await db.query(
-      `SELECT e.*
+      `SELECT e.event_id,
+              e.event_name,
+              e.event_description,
+              e.event_location,
+              e.start_time,
+              e.end_time,
+              GROUP_CONCAT(s.skill_name ORDER BY s.skill_name) AS required_skills
          FROM eventManage          e
          JOIN event_volunteer_link v ON v.event_id = e.event_id
-        WHERE v.user_id  = ?
+         LEFT JOIN event_skill     es ON es.event_id = e.event_id
+         LEFT JOIN skill           s  ON s.skill_id  = es.skill_id
+        WHERE v.user_id = ?
           AND e.start_time > NOW()
+        GROUP BY e.event_id
         ORDER BY e.start_time
         LIMIT 1`,
       [userId]

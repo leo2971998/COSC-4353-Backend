@@ -1,26 +1,21 @@
-// Leo Nguyen - 2234488 - all-in-one server.js
-// Run locally with:  node server.js
-// package.json should have  { "type": "module" }
-
 import express from "express";
 import cors from "cors";
 import mysql from "mysql2/promise";
 import bcrypt from "bcryptjs";
 import dotenv from "dotenv";
+import { volunteers } from "./data/volunteers.js";
+import { events as staticEvents } from "./data/events.js";
+import { notifications, addNotification } from "./data/notifications.js";
 dotenv.config();
 
 const app = express();
 
-/* ──────────────────────────────────────────────────────────
-   CORS
-   ────────────────────────────────────────────────────────── */
-const corsOptions = { origin: ["http://localhost:5173"] }; // ← add prod origin if needed
+// CORS
+const corsOptions = { origin: ["http://localhost:5173"] };
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-/* ──────────────────────────────────────────────────────────
-   MySQL pool  +  connectivity check
-   ────────────────────────────────────────────────────────── */
+// MySQL pool
 const db = mysql.createPool({
   host: process.env.DB_HOST || "192.168.1.198",
   port: 3306,
@@ -40,21 +35,13 @@ const db = mysql.createPool({
   }
 })();
 
-/* ──────────────────────────────────────────────────────────
-   Express middleware
-   ────────────────────────────────────────────────────────── */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-/* ──────────────────────────────────────────────────────────
-   EVENTS API  (built-in – no separate routes file)
-   ────────────────────────────────────────────────────────── */
-let eventsCache = []; // fallback for dev / DB outage
-
-// GET  /events  – calendar & dashboard use this
+// EVENTS API
+let eventsCache = [];
 app.get("/events", async (_req, res) => {
   try {
-    /* Leo Nguyen - 2234488 - include required skills via GROUP_CONCAT */
     const sql = `
       SELECT e.event_id,
              e.event_name,
@@ -69,7 +56,7 @@ app.get("/events", async (_req, res) => {
         LEFT JOIN skill       s  ON s.skill_id  = es.skill_id
        GROUP BY e.event_id`;
     const [events] = await db.query(sql);
-    eventsCache = events;               // refresh cache
+    eventsCache = events;
     res.json({ events });
   } catch (err) {
     console.error("Error fetching events:", err.message);
@@ -78,7 +65,6 @@ app.get("/events", async (_req, res) => {
   }
 });
 
-// POST /events – create a new event
 app.post("/events", async (req, res) => {
   const {
     event_name,
@@ -116,9 +102,7 @@ app.post("/events", async (req, res) => {
   }
 });
 
-/* ──────────────────────────────────────────────────────────
-   ORIGINAL AUTH / PROFILE / ADMIN CODE  (unchanged)
-   ────────────────────────────────────────────────────────── */
+// Auth helpers
 const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
 // Starts the server on port 3000 by default
@@ -333,7 +317,7 @@ app.get("/profile/:userId", async (req, res) => {
     if (!rows.length)
       return res.status(404).json({ message: "Profile not found" });
     const row = rows[0];
-    const skills = row.skills ? row.skills.split(/,\s*/) : [];
+    const skillsArr = row.skills ? row.skills.split(/,\s*/) : [];
     res.json({
       user_id: row.user_id,
       fullName: row.full_name,
@@ -342,7 +326,7 @@ app.get("/profile/:userId", async (req, res) => {
       city: row.city,
       state: row.state,
       zipCode: row.zip_code,
-      skills,
+      skills: skillsArr,
       preferences: row.preferences,
       availability: row.availability,
       is_complete: row.is_complete,
@@ -379,6 +363,7 @@ app.get("/users", async (_req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
 app.put("/users/:id/role", async (req, res) => {
   const { role } = req.body;
   if (!["user", "admin"].includes(role))
@@ -395,6 +380,7 @@ app.put("/users/:id/role", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
 app.put("/users/:id/password", async (req, res) => {
   const { password } = req.body;
   if (
@@ -416,6 +402,7 @@ app.put("/users/:id/password", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
 app.delete("/users/:id", async (req, res) => {
   try {
     await db.query("DELETE FROM profile WHERE user_id = ?", [req.params.id]);
@@ -427,13 +414,10 @@ app.delete("/users/:id", async (req, res) => {
   }
 });
 
-/* ──────────────────────────────────────────────────────────
-   Volunteer dashboard – next confirmed event
-   ────────────────────────────────────────────────────────── */
+// Volunteer dashboard – next confirmed event
 app.get("/volunteer-dashboard/:userId", async (req, res) => {
   const { userId } = req.params;
   try {
-    /* Leo Nguyen - 2234488 - include required skills */
     const [rows] = await db.query(
       `SELECT e.event_id,
               e.event_name,
@@ -458,6 +442,76 @@ app.get("/volunteer-dashboard/:userId", async (req, res) => {
     console.error("Next-event fetch error:", err);
     res.status(500).json({ message: "Server error" });
   }
+});
+
+// Suggested events (match) – inline implementation
+app.get("/suggested-events/:volunteerId", (req, res) => {
+  const { volunteerId } = req.params;
+  const volunteer = volunteers.find((v) => v.id === volunteerId);
+  if (!volunteer) {
+    return res.status(404).json({ message: "Volunteer not found" });
+  }
+
+  const matchedEvents = staticEvents
+    .map((event) => {
+      const locationMatch = event.location === volunteer.location;
+      const matchedSkills = event.requiredSkills.filter((skill) =>
+        volunteer.skills.includes(skill)
+      );
+      const skillScore = matchedSkills.length;
+      const availabilityMatch =
+        new Date(volunteer.availability.start) <= new Date(event.startTime) &&
+        new Date(volunteer.availability.end) >= new Date(event.endTime);
+      const preferenceBonus = volunteer.preferences.includes(event.preferenceTag)
+        ? 1
+        : 0;
+      const matchScore =
+        (locationMatch ? 1 : 0) +
+        (availabilityMatch ? 1 : 0) +
+        skillScore +
+        preferenceBonus;
+      return {
+        ...event,
+        matchScore,
+        matchedSkills,
+      };
+    })
+    .filter((event) => event.matchScore > 2)
+    .sort((a, b) => b.matchScore - a.matchScore);
+
+  if (matchedEvents.length > 0) {
+    addNotification(volunteer.id, `You've been matched to ${matchedEvents[0].title}!`);
+  }
+
+  res.json({ suggested_events: matchedEvents });
+});
+
+// Notifications – inline endpoints
+app.get("/notifications", (_req, res) => {
+  res.json({ notifications });
+});
+
+app.get("/notifications/:userId", (req, res) => {
+  const { userId } = req.params;
+  const userNotifications = notifications.filter(
+    (n) => n.userId === parseInt(userId)
+  );
+  res.json({ notifications: userNotifications });
+});
+
+app.post("/notifications", (req, res) => {
+  const { userId, message } = req.body;
+  if (!userId || !message) {
+    return res.status(400).json({ message: "Missing fields" });
+  }
+  const newNotification = {
+    id: Date.now(),
+    userId: parseInt(userId),
+    message,
+    read: false,
+  };
+  notifications.push(newNotification);
+  res.status(201).json(newNotification);
 });
 
 export default app;

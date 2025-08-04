@@ -6,9 +6,6 @@ import cors from "cors";
 import mysql from "mysql2/promise";
 import bcrypt from "bcryptjs";
 import dotenv from "dotenv";
-import { events } from "./data/events.js";
-import { volunteers as mockVolunteers } from "./data/volunteers.js";
-import { volunteerHistory } from "./data/volunteerHistory.js";
 dotenv.config();
 
 const app = express();

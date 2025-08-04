@@ -1,18 +1,28 @@
+// server.js  – run locally with:  node server.js
+// package.json should have  { "type": "module" }  if you want to keep import/export syntax.
+
 import express from "express";
 import cors from "cors";
 import mysql from "mysql2/promise";
 import bcrypt from "bcryptjs";
 import dotenv from "dotenv";
+import { events } from "./data/events.js";
+import { volunteers as mockVolunteers } from "./data/volunteers.js";
+import { volunteerHistory } from "./data/volunteerHistory.js";
 dotenv.config();
 
 const app = express();
 
-// CORS
-const corsOptions = { origin: ["http://localhost:5173"] };
+// ───────────────────────────────────────────────────────────────
+// CORS  (local Vite dev server)
+// ───────────────────────────────────────────────────────────────
+const corsOptions = { origin: ["http://localhost:5173"] }; // ← no trailing slash
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+app.options("*", cors(corsOptions)); // pre-flight
 
-// MySQL pool
+// ───────────────────────────────────────────────────────────────
+// MySQL pool  +  connectivity check
+// ───────────────────────────────────────────────────────────────
 const db = mysql.createPool({
   host: process.env.DB_HOST || "192.168.1.198",
   port: 3306,
@@ -21,6 +31,36 @@ const db = mysql.createPool({
   database: process.env.DB_NAME || "COSC4353",
   connectionLimit: 5,
 });
+
+const USE_DB =
+  String(process.env.USE_DB || "").toLowerCase() === "1" ||
+  String(process.env.USE_DB || "").toLowerCase() === "true";
+
+const query = async (sql, params) => {
+  const [results] = await db.execute(sql, params);
+  return results;
+};
+
+let notificationsMemory = [
+  { id: 1, userId: 1, message: "Event A", read: false },
+  { id: 2, userId: 1, message: "Event B", read: false },
+  { id: 3, userId: 2, message: "Event C", read: false },
+];
+
+async function addNotification(userId, message) {
+  if (!USE_DB) {
+    const n = { id: Date.now(), userId: Number(userId), message, read: false };
+    notificationsMemory.push(n);
+    return n;
+  }
+  await db.query(
+    "INSERT INTO notifications (userId, message, is_read) VALUES (?, ?, ?)",
+    [Number(userId), message, 0]
+  );
+  return { userId: Number(userId), message, read: false };
+}
+
+// Ping once to verify connectivity
 (async () => {
   try {
     const conn = await db.getConnection();
@@ -29,78 +69,252 @@ const db = mysql.createPool({
     conn.release();
   } catch (err) {
     console.error("❌  MySQL connection failed:", err.message);
+    // Optionally:   process.exit(1);
   }
 })();
 
+// ───────────────────────────────────────────────────────────────
+// Express middleware
+// ───────────────────────────────────────────────────────────────
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// EVENTS API
-let eventsCache = [];
-app.get("/events", async (_req, res) => {
-  try {
-    const sql = `
-      SELECT e.event_id,
-             e.event_name,
-             e.event_description,
-             e.event_location,
-             e.urgency,
-             e.start_time,
-             e.end_time,
-             GROUP_CONCAT(s.skill_name ORDER BY s.skill_name) AS required_skills
-        FROM eventManage      e
-        LEFT JOIN event_skill es ON es.event_id = e.event_id
-        LEFT JOIN skill       s  ON s.skill_id  = es.skill_id
-       GROUP BY e.event_id`;
-    const [events] = await db.query(sql);
-    eventsCache = events;
-    res.json({ events });
-  } catch (err) {
-    console.error("Error fetching events:", err.message);
-    if (eventsCache.length) return res.json({ events: eventsCache });
-    res.status(500).json({ message: "Error fetching events" });
-  }
+const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+
+// Log every incoming request
+app.use((req, res, next) => {
+  console.log(`Incoming ${req.method} request to ${req.url}`);
+  next();
 });
 
+// Event routes
 app.post("/events", async (req, res) => {
+  console.log("2. Backend: Received Request Body", req.body);
   const {
-    event_name,
-    event_description,
-    event_location,
+    eventName,
+    eventDescription,
+    location,
+    skills,
     urgency,
-    start_time,
-    end_time,
+    eventDate,
+    userId,
   } = req.body;
 
-  if (!event_name || !start_time || !end_time) {
-    return res
-      .status(400)
-      .json({ message: "event_name, start_time, end_time required" });
-  }
+  if (!userId) return res.status(400).json({ message: "userId required" });
 
   try {
-    const sql = `INSERT INTO eventManage
-                   (event_name, event_description, event_location,
-                    urgency, start_time, end_time)
-                 VALUES (?, ?, ?, ?, ?, ?)`;
-    const [result] = await db.query(sql, [
-      event_name,
-      event_description ?? null,
-      event_location ?? null,
-      urgency ?? null,
-      start_time,
-      end_time,
-    ]);
-    const newEvent = { event_id: result.insertId, ...req.body };
-    res.status(201).json({ message: "Event created", event: newEvent });
+    await db.query(
+      `INSERT INTO eventManage (user_id, eventName, eventDescription, location, skills, urgency, eventDate)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        userId,
+        eventName || null,
+        eventDescription || null,
+        location || null,
+        skills || null,
+        urgency || null,
+        eventDate || null,
+      ]
+    );
+
+    res.status(200).json({ message: "Event saved" });
   } catch (err) {
-    console.error("Error creating event:", err.message);
-    res.status(500).json({ message: "Error creating event" });
+    console.error("Event save error:", err);
+    res.status(500).json({ message: "Server error", error: err });
   }
 });
 
-// Auth helpers
-const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+app.get("/events/:userId", async (req, res) => {
+  const userId = req.params.userId;
+
+  try {
+    const [rows] = await db.query(
+      "SELECT * FROM eventManage WHERE user_id = ?",
+      [userId]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Error fetching events:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Volunteer matching
+app.get("/api/match/:volunteerId", async (req, res) => {
+  const { volunteerId } = req.params;
+
+  try {
+    let volunteer;
+    if (USE_DB) {
+      const [rows] = await db.query(
+        `SELECT id, location, skills, preferences, availability_start, availability_end
+         FROM volunteers WHERE id = ?`,
+        [volunteerId]
+      );
+      if (!rows.length) {
+        return res.status(404).json({ message: "Volunteer not found" });
+      }
+      volunteer = rows[0];
+      volunteer.skills = (volunteer.skills || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      volunteer.preferences = (volunteer.preferences || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      volunteer.availability = {
+        start: volunteer.availability_start,
+        end: volunteer.availability_end,
+      };
+    } else {
+      volunteer = mockVolunteers.find(
+        (v) => String(v.id) === String(volunteerId)
+      );
+      if (!volunteer) {
+        return res.status(404).json({ message: "Volunteer not found" });
+      }
+    }
+
+    const matchedEvents = events
+      .map((ev) => {
+        const locationMatch = ev.location === volunteer.location;
+
+        const matchedSkills = ev.requiredSkills.filter((skill) =>
+          (volunteer.skills || []).includes(skill)
+        );
+        const skillScore = matchedSkills.length;
+
+        const availabilityMatch =
+          new Date(volunteer.availability?.start) <= new Date(ev.startTime) &&
+          new Date(volunteer.availability?.end) >= new Date(ev.endTime);
+
+        const preferenceBonus = (volunteer.preferences || []).includes(
+          ev.preferenceTag
+        )
+          ? 1
+          : 0;
+
+        const matchScore =
+          (locationMatch ? 1 : 0) +
+          (availabilityMatch ? 1 : 0) +
+          skillScore +
+          preferenceBonus;
+
+        return { ...ev, matchScore, matchedSkills };
+      })
+      .filter((ev) => ev.matchScore > 2)
+      .sort((a, b) => b.matchScore - a.matchScore);
+
+    if (matchedEvents.length > 0) {
+      const top = matchedEvents[0];
+      const message = `You've been matched to ${top.title}!`;
+      await addNotification(volunteer.id, message);
+    }
+
+    return res.json(matchedEvents);
+  } catch (err) {
+    console.error("Error matching volunteer:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Notifications
+app.get("/api/notifications", async (_req, res) => {
+  if (!USE_DB) return res.json(notificationsMemory);
+
+  try {
+    const [rows] = await db.query(
+      "SELECT id, userId, message, is_read FROM notifications ORDER BY id DESC"
+    );
+    const out = rows.map((r) => ({
+      id: r.id,
+      userId: r.userId,
+      message: r.message,
+      read: !!(r.read ?? r.is_read),
+    }));
+    return res.json(out);
+  } catch {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/api/notifications/:userId", async (req, res) => {
+  const id = Number(req.params.userId);
+  if (!USE_DB)
+    return res.json(notificationsMemory.filter((n) => n.userId === id));
+
+  try {
+    const [rows] = await db.query(
+      "SELECT id, userId, message, is_read FROM notifications WHERE userId = ? ORDER BY id DESC",
+      [id]
+    );
+    const out = rows.map((r) => ({
+      id: r.id,
+      userId: r.userId,
+      message: r.message,
+      read: !!(r.read ?? r.is_read),
+    }));
+    return res.json(out);
+  } catch {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.post("/api/notifications", async (req, res) => {
+  const { userId, message } = req.body || {};
+  if (!userId || !message)
+    return res.status(400).json({ error: "Missing fields" });
+
+  try {
+    const n = await addNotification(userId, message);
+    return res.status(201).json(n);
+  } catch {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// History routes
+app.get("/history", (req, res) => {
+  res.json(volunteerHistory);
+});
+
+app.get("/history/:userID", async (req, res) => {
+  try {
+    const volunteer_id = req.params.userID;
+    const sql =
+      "SELECT vh.history_id, em.event_id, em.event_name, em.event_description, em.event_location, em.start_time, vh.event_status, em.urgency, GROUP_CONCAT(sk.skill_name) AS skills FROM volunteer_history AS vh JOIN eventManage AS em ON vh.event_id = em.event_id JOIN event_skill AS ek ON em.event_id = ek.event_id JOIN skill AS sk ON ek.skill_id = sk.skill_id WHERE vh.volunteer_id = ? GROUP BY vh.history_id, em.event_id;";
+    const volunteer_history = await query(sql, [volunteer_id]);
+
+    res.status(200).json({ volunteer_history });
+  } catch (error) {
+    console.error("Error fetching volunteer's history ", error.message);
+    res
+      .status(500)
+      .json({ message: "Server error fetching volunteer's history" });
+  }
+});
+
+// Volunteer dashboard
+app.get("/volunteer-dashboard/:userID", async (req, res) => {
+  try {
+    const volunteerID = req.params.userID;
+    const sql =
+      "SELECT l.full_name, em.event_id, em.event_name,em.start_time, em.end_time, em.event_location, em.event_description FROM login AS l JOIN volunteer_history AS vh ON l.id = vh.volunteer_id JOIN eventManage AS em ON vh.event_id = em.event_id WHERE l.id = ? AND em.start_time > NOW() ORDER BY em.start_time ASC LIMIT 1;";
+
+    const next_event = await query(sql, [volunteerID]);
+
+    res.status(200).json({ next_event });
+  } catch (error) {
+    console.error(
+      "Error fetching volunteer's history (Backend)",
+      error.message
+    );
+    res
+      .status(500)
+      .json({ message: "Server error fetching volunteer's next event" });
+  }
+});
 
 // Starts the server on port 3000 by default
 const PORT = process.env.PORT || 3000;
@@ -227,16 +441,16 @@ app.post("/profile", async (req, res) => {
   try {
     await db.query(
       `INSERT INTO profile (user_id, address1, address2, city, state, zip_code, preferences, availability, is_complete)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-        ON DUPLICATE KEY UPDATE
-             address1     = VALUES(address1),
-             address2     = VALUES(address2),
-             city         = VALUES(city),
-             state        = VALUES(state),
-             zip_code     = VALUES(zip_code),
-             preferences  = VALUES(preferences),
-             availability = VALUES(availability),
-             is_complete  = 1`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+           ON DUPLICATE KEY UPDATE
+                              address1     = VALUES(address1),
+                              address2     = VALUES(address2),
+                              city         = VALUES(city),
+                              state        = VALUES(state),
+                              zip_code     = VALUES(zip_code),
+                              preferences  = VALUES(preferences),
+                              availability = VALUES(availability),
+                              is_complete  = 1`,
       [
         userId,
         address1 || null,
@@ -293,7 +507,7 @@ app.get("/profile/:userId", async (req, res) => {
   try {
     const [rows] = await db.query(
       `SELECT p.user_id,
-              l.full_name,
+              l.full_name AS fullName,
               p.address1,
               p.address2,
               p.city,
@@ -314,16 +528,16 @@ app.get("/profile/:userId", async (req, res) => {
     if (!rows.length)
       return res.status(404).json({ message: "Profile not found" });
     const row = rows[0];
-    const skillsArr = row.skills ? row.skills.split(/,\s*/) : [];
+    const skills = row.skills ? row.skills.split(/,\s*/) : [];
     res.json({
       user_id: row.user_id,
-      fullName: row.full_name,
+      fullName: row.fullName,
       address1: row.address1,
       address2: row.address2,
       city: row.city,
       state: row.state,
       zipCode: row.zip_code,
-      skills: skillsArr,
+      skills,
       preferences: row.preferences,
       availability: row.availability,
       is_complete: row.is_complete,
@@ -334,25 +548,12 @@ app.get("/profile/:userId", async (req, res) => {
   }
 });
 
-// List all skills
-app.get("/skills", async (_req, res) => {
-  try {
-    const [rows] = await db.query(
-      "SELECT skill_name FROM skill ORDER BY skill_name"
-    );
-    const names = rows.map((r) => r.skill_name);
-    res.json(names);
-  } catch (err) {
-    console.error("Skills fetch error:", err);
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
 // Admin utilities
 app.get("/users", async (_req, res) => {
   try {
     const [rows] = await db.query(
       "SELECT id, full_name AS name, email, role FROM login"
+      //                ^^^^^^^^^^^^^^^ alias keeps front-end unchanged
     );
     res.json(rows);
   } catch (err) {
@@ -360,7 +561,6 @@ app.get("/users", async (_req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
 app.put("/users/:id/role", async (req, res) => {
   const { role } = req.body;
   if (!["user", "admin"].includes(role))
@@ -409,106 +609,6 @@ app.delete("/users/:id", async (req, res) => {
     console.error("User delete error:", err);
     res.status(500).json({ message: "Server error" });
   }
-});
-
-// Volunteer dashboard – next confirmed event
-app.get("/volunteer-dashboard/:userId", async (req, res) => {
-  const { userId } = req.params;
-  try {
-    const [rows] = await db.query(
-      `SELECT e.event_id,
-              e.event_name,
-              e.event_description,
-              e.event_location,
-              e.start_time,
-              e.end_time,
-              GROUP_CONCAT(s.skill_name ORDER BY s.skill_name) AS required_skills
-         FROM eventManage          e
-         JOIN event_volunteer_link v ON v.event_id = e.event_id
-         LEFT JOIN event_skill     es ON es.event_id = e.event_id
-         LEFT JOIN skill           s  ON s.skill_id  = es.skill_id
-        WHERE v.user_id = ?
-          AND e.start_time > NOW()
-        GROUP BY e.event_id
-        ORDER BY e.start_time
-        LIMIT 1`,
-      [userId]
-    );
-    res.json({ next_event: rows });
-  } catch (err) {
-    console.error("Next-event fetch error:", err);
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
-// Suggested events (match) – inline implementation
-app.get("/suggested-events/:volunteerId", (req, res) => {
-  const { volunteerId } = req.params;
-  const volunteer = volunteers.find((v) => v.id === volunteerId);
-  if (!volunteer) {
-    return res.status(404).json({ message: "Volunteer not found" });
-  }
-
-  const matchedEvents = staticEvents
-    .map((event) => {
-      const locationMatch = event.location === volunteer.location;
-      const matchedSkills = event.requiredSkills.filter((skill) =>
-        volunteer.skills.includes(skill)
-      );
-      const skillScore = matchedSkills.length;
-      const availabilityMatch =
-        new Date(volunteer.availability.start) <= new Date(event.startTime) &&
-        new Date(volunteer.availability.end) >= new Date(event.endTime);
-      const preferenceBonus = volunteer.preferences.includes(event.preferenceTag)
-        ? 1
-        : 0;
-      const matchScore =
-        (locationMatch ? 1 : 0) +
-        (availabilityMatch ? 1 : 0) +
-        skillScore +
-        preferenceBonus;
-      return {
-        ...event,
-        matchScore,
-        matchedSkills,
-      };
-    })
-    .filter((event) => event.matchScore > 2)
-    .sort((a, b) => b.matchScore - a.matchScore);
-
-  if (matchedEvents.length > 0) {
-    addNotification(volunteer.id, `You've been matched to ${matchedEvents[0].title}!`);
-  }
-
-  res.json({ suggested_events: matchedEvents });
-});
-
-// Notifications – inline endpoints
-app.get("/notifications", (_req, res) => {
-  res.json({ notifications });
-});
-
-app.get("/notifications/:userId", (req, res) => {
-  const { userId } = req.params;
-  const userNotifications = notifications.filter(
-    (n) => n.userId === parseInt(userId)
-  );
-  res.json({ notifications: userNotifications });
-});
-
-app.post("/notifications", (req, res) => {
-  const { userId, message } = req.body;
-  if (!userId || !message) {
-    return res.status(400).json({ message: "Missing fields" });
-  }
-  const newNotification = {
-    id: Date.now(),
-    userId: parseInt(userId),
-    message,
-    read: false,
-  };
-  notifications.push(newNotification);
-  res.status(201).json(newNotification);
 });
 
 export default app;

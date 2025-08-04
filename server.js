@@ -91,27 +91,38 @@ const addNotification = async (userId, message) => {
 
 /** GET  /events  – all events (joined with skills) */
 app.get("/events", async (_req, res) => {
-  if (!USE_DB) return res.json({ events: eventsMemory });
+  /* ─── non-DB mode: just return the cache ─── */
+  if (!USE_DB) {
+    return res.json({ events: eventsMemory });
+  }
+
+  /* ─── DB mode: join eventManage → event_skill → skill ─── */
   try {
     const sql = `
-      SELECT e.event_id,
-             e.event_name,
-             e.event_description,
-             e.event_location,
-             e.urgency,
-             e.start_time,
-             e.end_time,
-             GROUP_CONCAT(s.skill_name ORDER BY s.skill_name) AS required_skills
-        FROM eventManage      e
-        LEFT JOIN event_skill es ON es.event_id = e.event_id
-        LEFT JOIN skill       s  ON s.skill_id  = es.skill_id
-       GROUP BY e.event_id`;
-    const [events] = await db.query(sql);
-    eventsMemory = events;
-    res.json({ events });
+      SELECT  e.event_id,
+              e.event_name,
+              e.event_description,
+              e.event_location,
+              e.urgency,
+              e.start_time,
+              e.end_time,
+              GROUP_CONCAT(s.skill_name ORDER BY s.skill_name) AS required_skills
+        FROM  eventManage        e
+        LEFT JOIN event_skill    es ON es.event_id = e.event_id
+        LEFT JOIN skill          s  ON s.skill_id  = es.skill_id
+       GROUP BY e.event_id
+       ORDER BY e.start_time`;
+    const [rows] = await db.query(sql);
+
+    /* refresh fallback cache so FE still works if DB dies later */
+    eventsMemory = rows;
+    res.json({ events: rows });
   } catch (err) {
-    console.error("Error fetching events:", err.message); // eslint-disable-line no-console
+    console.error("GET /events DB error:", err.message);   // eslint-disable-line no-console
+
+    /* fall back to last-known cache so the calendar doesn’t break */
     if (eventsMemory.length) return res.json({ events: eventsMemory });
+
     res.status(500).json({ message: "Error fetching events" });
   }
 });

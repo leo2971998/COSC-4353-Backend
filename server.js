@@ -650,5 +650,156 @@ app.delete("/users/:id", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+/* 1️⃣  Admin 👉 choose a volunteer for an event
+      POST /events/:eventId/requests
+      Body: { volunteerId, requestedBy } */
+app.post("/events/:eventId/requests", async (req, res) => {
+  const { volunteerId, requestedBy } = req.body;
+  const { eventId } = req.params;
 
+  if (!volunteerId || !requestedBy) {
+    return res.status(400).json({ message: "volunteerId & requestedBy required" });
+  }
+
+  try {
+    /* create request row */
+    const [result] = await db.query(
+      `INSERT INTO event_volunteer_request
+         (event_id, volunteer_id, requested_by)
+       VALUES (?, ?, ?)`,
+      [eventId, volunteerId, requestedBy]
+    );
+    const requestId = result.insertId;
+
+    /* notify volunteer */
+    await db.query(
+      `INSERT INTO volunteer_request_notification
+         (request_id, volunteer_id, message)
+       VALUES (?, ?, ?)`,
+      [requestId, volunteerId,
+       `You’ve been requested for event #${eventId}. Please accept or decline.`]
+    );
+
+    res.status(201).json({ requestId });
+  } catch (err) {
+    console.error("POST /events/:eventId/requests →", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* 2️⃣  Volunteer 👉 accept / decline
+      PATCH /requests/:id
+      Body: { status }   ('Accepted' | 'Declined') */
+app.patch("/requests/:id", async (req, res) => {
+  const { status } = req.body;
+  const { id } = req.params;
+
+  if (!["Accepted", "Declined"].includes(status)) {
+    return res.status(400).json({ message: "status must be Accepted or Declined" });
+  }
+
+  try {
+    await db.query(
+      `UPDATE event_volunteer_request
+          SET status = ?, responded_at = NOW()
+        WHERE request_id = ?`,
+      [status, id]
+    );
+
+    /* mark linked notification as read */
+    await db.query(
+      `UPDATE volunteer_request_notification
+          SET is_read = 1, responded_at = NOW()
+        WHERE request_id = ?`,
+      [id]
+    );
+
+    res.json({ message: "Status updated" });
+  } catch (err) {
+    console.error("PATCH /requests/:id →", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* 3️⃣  Admin view – all requests for an event
+      GET /requests/event/:eventId */
+app.get("/requests/event/:eventId", async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT r.request_id, r.volunteer_id, l.full_name,
+              r.status, r.requested_at, r.responded_at
+         FROM event_volunteer_request r
+         JOIN login l ON l.id = r.volunteer_id
+        WHERE r.event_id = ?
+        ORDER BY r.requested_at DESC`,
+      [req.params.eventId]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("GET /requests/event/:eventId →", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* 4️⃣  Volunteer view – their pending / past requests
+      GET /requests/volunteer/:volunteerId */
+app.get("/requests/volunteer/:volunteerId", async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT r.request_id, r.event_id, e.event_name,
+              r.status, r.requested_at, r.responded_at
+         FROM event_volunteer_request r
+         JOIN eventManage e ON e.event_id = r.event_id
+        WHERE r.volunteer_id = ?
+        ORDER BY r.requested_at DESC`,
+      [req.params.volunteerId]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("GET /requests/volunteer/:volunteerId →", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* 5️⃣  Candidate helper – rank volunteers for an event by skill overlap
+      GET /events/:eventId/candidates  (admin tool) */
+app.get("/events/:eventId/candidates", async (req, res) => {
+  const { eventId } = req.params;
+  try {
+    const [rows] = await db.query(
+      `SELECT l.id       AS volunteer_id,
+              l.full_name,
+              COUNT(DISTINCT es.skill_id) AS overlap
+         FROM login          l
+         JOIN profile_skill  ps ON ps.user_id = l.id
+         JOIN event_skill    es ON es.skill_id = ps.skill_id
+        WHERE es.event_id = ?  AND l.role = 'user'
+        GROUP BY l.id
+        ORDER BY overlap DESC, l.full_name`,
+      [eventId]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("GET /events/:eventId/candidates →", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* 6️⃣  Volunteer-request notifications
+      GET /vr-notifications/:volunteerId */
+app.get("/vr-notifications/:volunteerId", async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT id, request_id, message, is_read, created_at
+         FROM volunteer_request_notification
+        WHERE volunteer_id = ?
+        ORDER BY created_at DESC`,
+      [req.params.volunteerId]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("GET /vr-notifications/:volunteerId →", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
 export default app;

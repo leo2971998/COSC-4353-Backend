@@ -657,30 +657,28 @@ app.post("/events/:eventId/requests", async (req, res) => {
   const { volunteerId, requestedBy } = req.body;
   const { eventId } = req.params;
 
-  if (!volunteerId || !requestedBy) {
+  if (!volunteerId || !requestedBy)
     return res.status(400).json({ message: "volunteerId & requestedBy required" });
-  }
 
   try {
-    /* create request row */
-    const [result] = await db.query(
+    /* insert request */
+    const [r] = await db.query(
       `INSERT INTO event_volunteer_request
          (event_id, volunteer_id, requested_by)
        VALUES (?, ?, ?)`,
       [eventId, volunteerId, requestedBy]
     );
-    const requestId = result.insertId;
 
-    /* notify volunteer */
+    /* optional: notify volunteer immediately */
     await db.query(
       `INSERT INTO volunteer_request_notification
          (request_id, volunteer_id, message)
        VALUES (?, ?, ?)`,
-      [requestId, volunteerId,
+      [r.insertId, volunteerId,
        `You’ve been requested for event #${eventId}. Please accept or decline.`]
     );
 
-    res.status(201).json({ requestId });
+    res.status(201).json({ requestId: r.insertId });
   } catch (err) {
     console.error("POST /events/:eventId/requests →", err);
     res.status(500).json({ message: "Server error" });
@@ -691,27 +689,23 @@ app.post("/events/:eventId/requests", async (req, res) => {
       PATCH /requests/:id
       Body: { status }   ('Accepted' | 'Declined') */
 app.patch("/requests/:id", async (req, res) => {
-  const { status } = req.body;
-  const { id } = req.params;
-
-  if (!["Accepted", "Declined"].includes(status)) {
-    return res.status(400).json({ message: "status must be Accepted or Declined" });
-  }
+  const { status } = req.body;                    // "Accepted" | "Declined"
+  if (!["Accepted", "Declined"].includes(status))
+    return res.status(400).json({ message: "Invalid status" });
 
   try {
     await db.query(
       `UPDATE event_volunteer_request
           SET status = ?, responded_at = NOW()
         WHERE request_id = ?`,
-      [status, id]
+      [status, req.params.id]
     );
 
-    /* mark linked notification as read */
-    await db.query(
+    await db.query(                                   // mark linked notification read
       `UPDATE volunteer_request_notification
           SET is_read = 1, responded_at = NOW()
         WHERE request_id = ?`,
-      [id]
+      [req.params.id]
     );
 
     res.json({ message: "Status updated" });
@@ -764,21 +758,22 @@ app.get("/requests/volunteer/:volunteerId", async (req, res) => {
 /* 5️⃣  Candidate helper – rank volunteers for an event by skill overlap
       GET /events/:eventId/candidates  (admin tool) */
 app.get("/events/:eventId/candidates", async (req, res) => {
-  const { eventId } = req.params;
   try {
     const [rows] = await db.query(
-      `SELECT l.id       AS volunteer_id,
+      `SELECT l.id  AS volunteer_id,
               l.full_name,
-              COUNT(DISTINCT es.skill_id) AS overlap
-         FROM login          l
-         JOIN profile_skill  ps ON ps.user_id = l.id
-         JOIN event_skill    es ON es.skill_id = ps.skill_id
+              COUNT(DISTINCT es.skill_id)             AS overlap,
+              GROUP_CONCAT(DISTINCT s.skill_name)     AS skills
+         FROM login            l
+         JOIN profile_skill    ps ON ps.user_id = l.id
+         JOIN skill            s  ON s.skill_id = ps.skill_id
+         JOIN event_skill      es ON es.skill_id = s.skill_id
         WHERE es.event_id = ?  AND l.role = 'user'
         GROUP BY l.id
         ORDER BY overlap DESC, l.full_name`,
-      [eventId]
+      [req.params.eventId]
     );
-    res.json(rows);
+    res.json(rows);                                   // [{ volunteer_id, full_name, overlap, skills }]
   } catch (err) {
     console.error("GET /events/:eventId/candidates →", err);
     res.status(500).json({ message: "Server error" });

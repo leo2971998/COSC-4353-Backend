@@ -90,12 +90,7 @@ const addNotification = async (userId, message) => {
    ─────────────────────────────────────────────────────────── */
 
 /** GET  /events  – all events (joined with skills) */
-app.get("/events", async (_req, res) => {
-  /* ─── non-DB mode: just return the cache ─── */
-  if (!USE_DB) {
-    return res.json({ events: eventsMemory });
-  }
-
+app.get("/events", async (req, res) => {
   /* ─── DB mode: join eventManage → event_skill → skill ─── */
   try {
     const sql = `

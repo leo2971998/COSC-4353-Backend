@@ -783,17 +783,38 @@ app.get("/events/:eventId/candidates", async (req, res) => {
 /* 6️⃣  Volunteer-request notifications
       GET /vr-notifications/:volunteerId */
 app.get("/vr-notifications/:volunteerId", async (req, res) => {
+  const { volunteerId } = req.params;
+
   try {
     const [rows] = await db.query(
-      `SELECT id, request_id, message, is_read, created_at
-         FROM volunteer_request_notification
-        WHERE volunteer_id = ?
-        ORDER BY created_at DESC`,
-      [req.params.volunteerId]
+      `SELECT vrn.id,
+              vrn.request_id,
+              evr.event_id,                 -- ⬅️  include event reference
+              vrn.message,
+              vrn.is_read,
+              vrn.created_at
+         FROM volunteer_request_notification AS vrn
+         JOIN event_volunteer_request        AS evr
+               ON evr.request_id = vrn.request_id
+        WHERE vrn.volunteer_id = ?
+        ORDER BY vrn.created_at DESC`,
+      [volunteerId]
     );
-    res.json(rows);
+
+    /* Attach a type flag so the UI knows these are request alerts */
+    const out = rows.map((r) => ({
+      id:         r.id,
+      request_id: r.request_id,
+      event_id:   r.event_id,
+      message:    r.message,
+      is_read:    !!r.is_read,
+      created_at: r.created_at,
+      type:       "request",
+    }));
+
+    res.json(out);
   } catch (err) {
-    console.error("GET /vr-notifications/:volunteerId →", err);
+    console.error("GET /vr-notifications error:", err.message);
     res.status(500).json({ message: "Server error" });
   }
 });

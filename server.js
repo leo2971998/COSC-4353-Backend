@@ -797,4 +797,51 @@ app.get("/vr-notifications/:volunteerId", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+/* ──────────────────────────────────────────────────────────────
+   BULK volunteer-request  (Admin → many volunteers at once)
+────────────────────────────────────────────────────────────── */
+/* POST /events/:eventId/requests/bulk
+   Body: { volunteerIds: [1,2,3], requestedBy: 7 } */
+app.post("/events/:eventId/requests/bulk", async (req, res) => {
+  const { volunteerIds = [], requestedBy } = req.body;
+  const { eventId } = req.params;
+
+  if (!volunteerIds.length || !requestedBy)
+    return res.status(400).json({ message: "volunteerIds[] & requestedBy required" });
+
+  /* drop duplicates just in case */
+  const uniq = [...new Set(volunteerIds.map(Number))];
+
+  try {
+    /* insert all requests in one query */
+    const values = uniq.map((id) => `(${db.escape(eventId)},${db.escape(id)},${db.escape(requestedBy)})`).join(",");
+    await db.query(
+      `INSERT IGNORE INTO event_volunteer_request (event_id, volunteer_id, requested_by)
+       VALUES ${values}`
+    );
+
+    /* create matching notifications */
+    const notifVals = uniq
+      .map(
+        (id) =>
+          `(
+            LAST_INSERT_ID(),        -- same request_id FK
+            ${db.escape(id)},
+            ${db.escape(`You’ve been requested for event #${eventId}. Please accept or decline.`)}
+          )`
+      )
+      .join(",");
+    await db.query(
+      `INSERT INTO volunteer_request_notification
+         (request_id, volunteer_id, message)
+       VALUES ${notifVals}`
+    );
+
+    res.status(201).json({ sent: uniq.length });
+  } catch (err) {
+    console.error("POST /events/:eventId/requests/bulk →", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 export default app;

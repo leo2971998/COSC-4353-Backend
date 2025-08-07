@@ -122,51 +122,41 @@ app.get("/events", async (req, res) => {
   }
 });
 
-/** POST /events  – create a new event
- *  Accepts either camelCase or snake_case body fields.
- */
+/* create */
 app.post("/events", async (req, res) => {
-  const body = req.body;
-  const event_name        = body.event_name        ?? body.eventName;
-  const event_description = body.event_description ?? body.eventDescription;
-  const event_location    = body.event_location    ?? body.location;
-  const urgency           = body.urgency;
-  const start_time        = body.start_time        ?? body.eventDate ?? body.start_time;
-  const end_time          = body.end_time          ?? body.endDate   ?? body.end_time;
-  const user_id           = body.user_id           ?? body.userId    ?? null;
-
-  if (!event_name || !start_time || !end_time) {
-    return res
-      .status(400)
-      .json({ message: "event_name, start_time, end_time are required" });
-  }
-
-  try {
-    const sql = `
-      INSERT INTO eventManage
-        (event_name, event_description, event_location,
-         urgency, start_time, end_time, user_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `;
-    const [result] = await query(sql, [
-      event_name,
-      event_description ?? null,
-      event_location ?? null,
-      urgency ?? null,
-      start_time,
-      end_time,
-      user_id,
-    ]);
-
-    const newEvent = { event_id: result.insertId, ...body };
-    if (!USE_DB) eventsMemory.push(newEvent);
-    res.status(201).json({ message: "Event created", event: newEvent });
-  } catch (err) {
-    console.error("Error creating event:", err.message); // eslint-disable-line no-console
-    res.status(500).json({ message: "Error creating event" });
-  }
+  const b = req.body;
+  const [r] = await db.query(
+    `INSERT INTO eventManage
+     (event_name,event_description,event_location,urgency,start_time,end_time,created_by)
+     VALUES (?,?,?,?,?,?,?)`,
+    [b.event_name,b.event_description,b.event_location,b.urgency,b.start_time,b.end_time,b.created_by]
+  );
+  res.status(201).json({ event_id: r.insertId });
 });
 
+/* update */
+app.put("/events/:id", async (req, res) => {
+  const { id } = req.params;
+  const b = req.body;
+  await db.query(
+    `UPDATE eventManage
+        SET event_name=?,
+            event_description=?,
+            event_location=?,
+            urgency=?,
+            start_time=?,
+            end_time=?
+      WHERE event_id=?`,
+    [b.event_name,b.event_description,b.event_location,b.urgency,b.start_time,b.end_time,id]
+  );
+  res.json({ message:"Event updated" });
+});
+
+/* delete */
+app.delete("/events/:id", async (req,res)=>{
+  await db.query("DELETE FROM eventManage WHERE event_id=?", [req.params.id]);
+  res.json({ message:"Event deleted" });
+});
 /** GET /events/:userId  – events created by / assigned to a user */
 app.get("/events/:userId", async (req, res) => {
   const { userId } = req.params;

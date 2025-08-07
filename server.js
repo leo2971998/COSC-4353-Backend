@@ -865,29 +865,44 @@ app.post("/events/:eventId/requests/bulk", async (req, res) => {
   }
 });
 app.get("/reports/event-summary", async (req, res) => {
-  const { start, end } = req.query;
+  const { start, end, urgency, location, minAccepted } = req.query;
   if (!start || !end) return res.status(400).json({ message: "start & end required" });
 
+  const where = ["e.start_time BETWEEN ? AND ?"];
+  const args  = [start, `${end} 23:59:59`];
+
+  if (urgency && urgency !== "All") {
+    where.push("e.urgency = ?");
+    args.push(urgency);
+  }
+  if (location) {
+    where.push("LOWER(e.event_location) LIKE ?");
+    args.push(`%${location.toLowerCase()}%`);
+  }
+
+  /* build query first so we can reuse HAVING for minAccepted */
+  const sql = `
+    SELECT e.event_id,
+           e.event_name,
+           e.urgency,
+           e.event_location,
+           e.start_time,
+           e.end_time,
+           COUNT(r.request_id)                        AS total_requests,
+           SUM(r.status = 'Pending')   AS pending,
+           SUM(r.status = 'Accepted')  AS accepted,
+           SUM(r.status = 'Declined')  AS declined
+      FROM eventManage               e
+      LEFT JOIN event_volunteer_request r ON r.event_id = e.event_id
+     WHERE ${where.join(" AND ")}
+     GROUP BY e.event_id
+     ${minAccepted ? "HAVING accepted >= ?" : ""}
+     ORDER BY e.start_time
+  `;
+  if (minAccepted) args.push(Number(minAccepted));
+
   try {
-    const [rows] = await db.query(
-      `
-      SELECT  e.event_id,
-              e.event_name,
-              e.urgency,
-              e.start_time,
-              e.end_time,
-              COUNT(r.request_id)                           AS total_requests,
-              SUM(r.status = 'Pending')   AS pending,
-              SUM(r.status = 'Accepted')  AS accepted,
-              SUM(r.status = 'Declined')  AS declined
-        FROM eventManage               e
-        LEFT JOIN event_volunteer_request r ON r.event_id = e.event_id
-       WHERE e.start_time BETWEEN ? AND ?
-       GROUP BY e.event_id
-       ORDER BY e.start_time
-      `,
-      [start, `${end} 23:59:59`]
-    );
+    const [rows] = await db.query(sql, args);
     res.json(rows);
   } catch (err) {
     console.error("event-summary error:", err.message);

@@ -864,8 +864,9 @@ app.post("/events/:eventId/requests/bulk", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+/* /reports/event-summary  — now supports ?status=Pending|Accepted|Declined */
 app.get("/reports/event-summary", async (req, res) => {
-  const { start, end, urgency, location, minAccepted } = req.query;
+  const { start, end, urgency, status } = req.query;
   if (!start || !end) return res.status(400).json({ message: "start & end required" });
 
   const where = ["e.start_time BETWEEN ? AND ?"];
@@ -875,12 +876,8 @@ app.get("/reports/event-summary", async (req, res) => {
     where.push("e.urgency = ?");
     args.push(urgency);
   }
-  if (location) {
-    where.push("LOWER(e.event_location) LIKE ?");
-    args.push(`%${location.toLowerCase()}%`);
-  }
 
-  /* build query first so we can reuse HAVING for minAccepted */
+  /* base query */
   const sql = `
     SELECT e.event_id,
            e.event_name,
@@ -889,17 +886,16 @@ app.get("/reports/event-summary", async (req, res) => {
            e.start_time,
            e.end_time,
            COUNT(r.request_id)                        AS total_requests,
-           SUM(r.status = 'Pending')   AS pending,
-           SUM(r.status = 'Accepted')  AS accepted,
-           SUM(r.status = 'Declined')  AS declined
-      FROM eventManage               e
+           SUM(r.status='Pending')   AS pending,
+           SUM(r.status='Accepted')  AS accepted,
+           SUM(r.status='Declined')  AS declined
+      FROM eventManage e
       LEFT JOIN event_volunteer_request r ON r.event_id = e.event_id
      WHERE ${where.join(" AND ")}
      GROUP BY e.event_id
-     ${minAccepted ? "HAVING accepted >= ?" : ""}
+     ${status && status !== "All" ? `HAVING ${status.toLowerCase()} > 0` : ""}
      ORDER BY e.start_time
   `;
-  if (minAccepted) args.push(Number(minAccepted));
 
   try {
     const [rows] = await db.query(sql, args);

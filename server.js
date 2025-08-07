@@ -864,5 +864,34 @@ app.post("/events/:eventId/requests/bulk", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+app.get("/reports/event-summary", async (req, res) => {
+  const { start, end } = req.query;
+  if (!start || !end) return res.status(400).json({ message: "start & end required" });
 
+  try {
+    const [rows] = await db.query(
+      `
+      SELECT  e.event_id,
+              e.event_name,
+              e.urgency,
+              e.start_time,
+              e.end_time,
+              COUNT(r.request_id)                           AS total_requests,
+              SUM(r.status = 'Pending')   AS pending,
+              SUM(r.status = 'Accepted')  AS accepted,
+              SUM(r.status = 'Declined')  AS declined
+        FROM eventManage               e
+        LEFT JOIN event_volunteer_request r ON r.event_id = e.event_id
+       WHERE e.start_time BETWEEN ? AND ?
+       GROUP BY e.event_id
+       ORDER BY e.start_time
+      `,
+      [start, `${end} 23:59:59`]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("event-summary error:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
 export default app;

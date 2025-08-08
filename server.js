@@ -774,28 +774,39 @@ app.get("/events/:eventId/candidates", async (req, res) => {
       GET /vr-notifications/:volunteerId */
 app.get("/vr-notifications/:volunteerId", async (req, res) => {
   const { volunteerId } = req.params;
+  const showAll = String(req.query.all || "") === "1";
 
   try {
+    const where = [`vrn.volunteer_id = ?`];
+    const args  = [volunteerId];
+
+    if (!showAll) {
+      // Only show unread + pending
+      where.push(`vrn.is_read = 0`);
+      where.push(`(evr.status IS NULL OR evr.status = 'Pending')`);
+    }
+
     const [rows] = await db.query(
       `SELECT vrn.id,
               vrn.request_id,
-              evr.event_id,                 -- ⬅️  include event reference
+              evr.event_id,
+              evr.status,
               vrn.message,
               vrn.is_read,
               vrn.created_at
          FROM volunteer_request_notification AS vrn
          JOIN event_volunteer_request        AS evr
-               ON evr.request_id = vrn.request_id
-        WHERE vrn.volunteer_id = ?
+           ON evr.request_id = vrn.request_id
+        WHERE ${where.join(" AND ")}
         ORDER BY vrn.created_at DESC`,
-      [volunteerId]
+      args
     );
 
-    /* Attach a type flag so the UI knows these are request alerts */
     const out = rows.map((r) => ({
       id:         r.id,
       request_id: r.request_id,
       event_id:   r.event_id,
+      status:     r.status,
       message:    r.message,
       is_read:    !!r.is_read,
       created_at: r.created_at,
@@ -892,6 +903,95 @@ app.get("/reports/event-summary", async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error("event-summary error:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+/* 2️⃣  Volunteer 👉 accept / decline
+      PATCH /requests/:id
+      Body: { status }   ('Accepted' | 'Declined') */
+app.patch("/requests/:id", async (req, res) => {
+  const { status } = req.body; // "Accepted" | "Declined"
+  if (!["Accepted", "Declined"].includes(status))
+    return res.status(400).json({ message: "Invalid status" });
+
+  const requestId = req.params.id;
+
+  try {
+    // Look up the request to get event + volunteer
+    const [reqRows] = await db.query(
+      `SELECT request_id, event_id, volunteer_id
+         FROM event_volunteer_request
+        WHERE request_id = ?`,
+      [requestId]
+    );
+    if (!reqRows.length) return res.status(404).json({ message: "Request not found" });
+
+    const { event_id, volunteer_id } = reqRows[0];
+
+    // Update request status + timestamps
+    await db.query(
+      `UPDATE event_volunteer_request
+          SET status = ?, responded_at = NOW()
+        WHERE request_id = ?`,
+      [status, requestId]
+    );
+
+    // Mark linked notification read
+    await db.query(
+      `UPDATE volunteer_request_notification
+          SET is_read = 1, responded_at = NOW()
+        WHERE request_id = ?`,
+      [requestId]
+    );
+
+    // If accepted → enroll the volunteer
+    if (status === "Accepted") {
+      // ensure enrollment (avoid dupes)
+      await db.query(
+        `INSERT IGNORE INTO event_volunteer_link (event_id, user_id, joined_at)
+         VALUES (?, ?, NOW())`,
+        [event_id, volunteer_id]
+      );
+
+      // ensure upcoming history row (idempotent-ish)
+      await db.query(
+        `INSERT INTO volunteer_history (volunteer_id, event_id, event_status)
+         SELECT ?, ?, 'Upcoming'
+          WHERE NOT EXISTS (
+            SELECT 1 FROM volunteer_history
+             WHERE volunteer_id = ? AND event_id = ? AND event_status IN ('Upcoming','Attended')
+          )`,
+        [volunteer_id, event_id, volunteer_id, event_id]
+      );
+    }
+
+    res.json({ message: "Status updated", event_id, volunteer_id });
+  } catch (err) {
+    console.error("PATCH /requests/:id →", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+/* POST /volunteer-dashboard/browse-enroll/:userId/:eventId */
+app.post("/volunteer-dashboard/browse-enroll/:userId/:eventId", async (req, res) => {
+  const { userId, eventId } = req.params;
+  try {
+    await db.query(
+      `INSERT IGNORE INTO event_volunteer_link (event_id, user_id, joined_at)
+       VALUES (?, ?, NOW())`,
+      [eventId, userId]
+    );
+    await db.query(
+      `INSERT INTO volunteer_history (volunteer_id, event_id, event_status)
+       SELECT ?, ?, 'Upcoming'
+        WHERE NOT EXISTS (
+          SELECT 1 FROM volunteer_history
+           WHERE volunteer_id = ? AND event_id = ? AND event_status IN ('Upcoming','Attended')
+        )`,
+      [userId, eventId, userId, eventId]
+    );
+    res.status(201).json({ message: "Enrolled" });
+  } catch (err) {
+    console.error("browse-enroll error:", err.message);
     res.status(500).json({ message: "Server error" });
   }
 });

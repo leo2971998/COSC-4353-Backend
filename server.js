@@ -1038,6 +1038,7 @@ app.get("/volunteer-dashboard/calendar/:userId", async (req, res) => {
 });
 /* /reports/volunteer-activity  — grouped by volunteer
    Query: ?start=YYYY-MM-DD&end=YYYY-MM-DD&urgency=All|High|Medium|Low&status=All|Attended|Missed|Withdrew|Upcoming */
+// Volunteer Activity (grouped by volunteer)
 app.get("/reports/volunteer-activity", async (req, res) => {
   const { start, end, urgency = "All", status = "All" } = req.query;
   if (!start || !end) return res.status(400).json({ message: "start & end required" });
@@ -1046,27 +1047,37 @@ app.get("/reports/volunteer-activity", async (req, res) => {
   const args  = [start, `${end} 23:59:59`];
 
   if (urgency && urgency !== "All") { where.push("e.urgency = ?"); args.push(urgency); }
-  if (status && status !== "All")   { where.push("h.event_status = ?"); args.push(status); }
+  if (status  && status  !== "All") { where.push("h.event_status = ?"); args.push(status); }
 
   const sql = `
     SELECT
-      l.id                                  AS volunteer_id,
-      COALESCE(l.full_name,'(no name)')     AS full_name,
-      COUNT(*)                              AS events,
-      SUM(COALESCE(h.hours_served,
-                   TIMESTAMPDIFF(MINUTE, e.start_time, e.end_time)/60.0)) AS hours,
-      SUM(h.event_status='Attended')        AS attended,
-      SUM(h.event_status='Missed')          AS missed,
-      SUM(h.event_status='Withdrew')        AS withdrew,
-      AVG(NULLIF(h.rating,0))               AS avg_rating,
-      MIN(e.start_time)                     AS first_event,
-      MAX(e.start_time)                     AS last_event
+      h.volunteer_id,
+      l.full_name,
+      COUNT(DISTINCT h.event_id) AS events,
+      SUM(
+        CASE WHEN h.event_status='Attended' THEN
+          COALESCE(
+            h.hours_served,
+            TIMESTAMPDIFF(
+              MINUTE,
+              LEAST(e.start_time, e.end_time),
+              GREATEST(e.start_time, e.end_time)
+            )/60.0
+          )
+        ELSE 0 END
+      ) AS hours,
+      SUM(h.event_status='Attended') AS attended,
+      SUM(h.event_status='Missed')   AS missed,
+      SUM(h.event_status='Withdrew') AS withdrew,
+      AVG(NULLIF(h.rating,0))        AS avg_rating,
+      MIN(e.start_time)              AS first_event,
+      MAX(e.start_time)              AS last_event
     FROM volunteer_history h
     JOIN eventManage e ON e.event_id = h.event_id
     JOIN login       l ON l.id = h.volunteer_id
     WHERE ${where.join(" AND ")}
-    GROUP BY l.id, l.full_name
-    ORDER BY hours DESC, events DESC, full_name
+    GROUP BY h.volunteer_id, l.full_name
+    ORDER BY l.full_name
   `;
 
   try {
@@ -1077,6 +1088,7 @@ app.get("/reports/volunteer-activity", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
 /* /reports/volunteer-activity/by-event  — grouped by event
    Query: ?start=YYYY-MM-DD&end=YYYY-MM-DD&urgency=...&status=All|Attended|Missed|Withdrew|Upcoming */
 app.get("/reports/volunteer-activity/by-event", async (req, res) => {

@@ -162,16 +162,15 @@ app.get("/events/:userId", async (req, res) => {
   const { userId } = req.params;
   try {
     const [rows] = await query(
-      `SELECT * FROM eventManage WHERE user_id = ?`,
+      `SELECT * FROM eventManage WHERE created_by = ?`,
       [userId]
     );
     res.json(rows);
   } catch (err) {
-    console.error("Error fetching user events:", err); // eslint-disable-line no-console
+    console.error("Error fetching user events:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
-
 /* ──────────────────────────────────────────────────────────────
    VOLUNTEER MATCHING  (/api/match)
    ─────────────────────────────────────────────────────────── */
@@ -889,7 +888,6 @@ app.patch("/requests/:id", async (req, res) => {
   const requestId = req.params.id;
 
   try {
-    // Look up the request to get event + volunteer
     const [reqRows] = await db.query(
       `SELECT request_id, event_id, volunteer_id
          FROM event_volunteer_request
@@ -900,7 +898,6 @@ app.patch("/requests/:id", async (req, res) => {
 
     const { event_id, volunteer_id } = reqRows[0];
 
-    // Update request status + timestamps
     await db.query(
       `UPDATE event_volunteer_request
           SET status = ?, responded_at = NOW()
@@ -908,7 +905,6 @@ app.patch("/requests/:id", async (req, res) => {
       [status, requestId]
     );
 
-    // Mark linked notification read
     await db.query(
       `UPDATE volunteer_request_notification
           SET is_read = 1, responded_at = NOW()
@@ -916,22 +912,14 @@ app.patch("/requests/:id", async (req, res) => {
       [requestId]
     );
 
-    // If accepted → enroll the volunteer
     if (status === "Accepted") {
-      // ensure enrollment (avoid dupes)
-      await db.query(
-        `INSERT IGNORE INTO event_volunteer_link (event_id, user_id, joined_at)
-         VALUES (?, ?, NOW())`,
-        [event_id, volunteer_id]
-      );
-
-      // ensure upcoming history row (idempotent-ish)
       await db.query(
         `INSERT INTO volunteer_history (volunteer_id, event_id, event_status)
          SELECT ?, ?, 'Upcoming'
           WHERE NOT EXISTS (
             SELECT 1 FROM volunteer_history
-             WHERE volunteer_id = ? AND event_id = ? AND event_status IN ('Upcoming','Attended')
+             WHERE volunteer_id = ? AND event_id = ?
+               AND event_status IN ('Upcoming','Attended')
           )`,
         [volunteer_id, event_id, volunteer_id, event_id]
       );
@@ -948,16 +936,12 @@ app.post("/volunteer-dashboard/browse-enroll/:userId/:eventId", async (req, res)
   const { userId, eventId } = req.params;
   try {
     await db.query(
-      `INSERT IGNORE INTO event_volunteer_link (event_id, user_id, joined_at)
-       VALUES (?, ?, NOW())`,
-      [eventId, userId]
-    );
-    await db.query(
       `INSERT INTO volunteer_history (volunteer_id, event_id, event_status)
        SELECT ?, ?, 'Upcoming'
         WHERE NOT EXISTS (
           SELECT 1 FROM volunteer_history
-           WHERE volunteer_id = ? AND event_id = ? AND event_status IN ('Upcoming','Attended')
+           WHERE volunteer_id = ? AND event_id = ?
+             AND event_status IN ('Upcoming','Attended')
         )`,
       [userId, eventId, userId, eventId]
     );
@@ -967,7 +951,34 @@ app.post("/volunteer-dashboard/browse-enroll/:userId/:eventId", async (req, res)
     res.status(500).json({ message: "Server error" });
   }
 });
-app.get("/volunteer-dashboard/enrolled-events/:userId"
+
+app.get("/volunteer-dashboard/enrolled-events/:userId", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const [rows] = await db.query(
+      `SELECT e.event_id,
+              e.event_name,
+              e.event_description,
+              e.event_location,
+              e.urgency,
+              e.start_time,
+              e.end_time,
+              GROUP_CONCAT(s.skill_name ORDER BY s.skill_name) AS required_skills
+         FROM volunteer_history h
+         JOIN eventManage e    ON e.event_id = h.event_id
+         LEFT JOIN event_skill es ON es.event_id = e.event_id
+         LEFT JOIN skill s        ON s.skill_id = es.skill_id
+        WHERE h.volunteer_id = ? AND h.event_status = 'Upcoming'
+        GROUP BY e.event_id
+        ORDER BY e.start_time`,
+      [userId]
+    );
+    res.json({ events: rows });
+  } catch (err) {
+    console.error("enrolled-events error:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
 /* GET /volunteer-dashboard/browse-events/:userId */
 app.get("/volunteer-dashboard/browse-events/:userId", async (req, res) => {
   const { userId } = req.params;
@@ -983,10 +994,11 @@ app.get("/volunteer-dashboard/browse-events/:userId", async (req, res) => {
               GROUP_CONCAT(s.skill_name ORDER BY s.skill_name) AS required_skills
          FROM eventManage e
          LEFT JOIN event_skill es ON es.event_id = e.event_id
-         LEFT JOIN skill s ON s.skill_id = es.skill_id
+         LEFT JOIN skill s        ON s.skill_id = es.skill_id
         WHERE e.start_time >= NOW()
           AND e.event_id NOT IN (
-            SELECT event_id FROM event_volunteer_link WHERE user_id = ?
+            SELECT event_id FROM volunteer_history
+             WHERE volunteer_id = ? AND event_status IN ('Upcoming','Attended')
           )
         GROUP BY e.event_id
         ORDER BY e.start_time`,
@@ -998,32 +1010,32 @@ app.get("/volunteer-dashboard/browse-events/:userId", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
 /* GET /volunteer-dashboard/calendar/:userId */
 app.get("/volunteer-dashboard/calendar/:userId", async (req, res) => {
   const { userId } = req.params;
   try {
     const [rows] = await db.query(
-      `SELECT e.event_id,
-              e.event_name,
-              e.start_time,
-              e.end_time
-         FROM eventManage e
-         JOIN event_volunteer_link v ON v.event_id = e.event_id
-        WHERE v.user_id = ?
+      `SELECT e.event_id, e.event_name, e.start_time, e.end_time
+         FROM volunteer_history h
+         JOIN eventManage e ON e.event_id = h.event_id
+        WHERE h.volunteer_id = ? AND h.event_status = 'Upcoming'
         ORDER BY e.start_time`,
       [userId]
     );
-    const calendarData = rows.map(r => ({
-      event_id: r.event_id,
-      title: r.event_name,
-      start: r.start_time,
-      end: r.end_time,
-    }));
-    res.json({ calendarData });
+    res.json({
+      calendarData: rows.map(r => ({
+        event_id: r.event_id,
+        title:    r.event_name,
+        start:    r.start_time,
+        end:      r.end_time,
+      }))
+    });
   } catch (err) {
     console.error("calendar error:", err.message);
     res.status(500).json({ message: "Server error" });
   }
 });
+
 
 export default app;

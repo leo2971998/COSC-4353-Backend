@@ -1036,6 +1036,156 @@ app.get("/volunteer-dashboard/calendar/:userId", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+/* /reports/volunteer-activity  — grouped by volunteer
+   Query: ?start=YYYY-MM-DD&end=YYYY-MM-DD&urgency=All|High|Medium|Low&status=All|Attended|Missed|Withdrew|Upcoming */
+app.get("/reports/volunteer-activity", async (req, res) => {
+  const { start, end, urgency = "All", status = "All" } = req.query;
+  if (!start || !end) return res.status(400).json({ message: "start & end required" });
 
+  const where = ["e.start_time BETWEEN ? AND ?"];
+  const args  = [start, `${end} 23:59:59`];
+
+  if (urgency && urgency !== "All") { where.push("e.urgency = ?"); args.push(urgency); }
+  if (status && status !== "All")   { where.push("h.event_status = ?"); args.push(status); }
+
+  const sql = `
+    SELECT
+      l.id                                  AS volunteer_id,
+      COALESCE(l.full_name,'(no name)')     AS full_name,
+      COUNT(*)                              AS events,
+      SUM(COALESCE(h.hours_served,
+                   TIMESTAMPDIFF(MINUTE, e.start_time, e.end_time)/60.0)) AS hours,
+      SUM(h.event_status='Attended')        AS attended,
+      SUM(h.event_status='Missed')          AS missed,
+      SUM(h.event_status='Withdrew')        AS withdrew,
+      AVG(NULLIF(h.rating,0))               AS avg_rating,
+      MIN(e.start_time)                     AS first_event,
+      MAX(e.start_time)                     AS last_event
+    FROM volunteer_history h
+    JOIN eventManage e ON e.event_id = h.event_id
+    JOIN login       l ON l.id = h.volunteer_id
+    WHERE ${where.join(" AND ")}
+    GROUP BY l.id, l.full_name
+    ORDER BY hours DESC, events DESC, full_name
+  `;
+
+  try {
+    const [rows] = await db.query(sql, args);
+    res.json(rows);
+  } catch (err) {
+    console.error("volunteer-activity error:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+/* /reports/volunteer-activity/by-event  — grouped by event
+   Query: ?start=YYYY-MM-DD&end=YYYY-MM-DD&urgency=...&status=All|Attended|Missed|Withdrew|Upcoming */
+app.get("/reports/volunteer-activity/by-event", async (req, res) => {
+  const { start, end, urgency = "All", status = "All" } = req.query;
+  if (!start || !end) return res.status(400).json({ message: "start & end required" });
+
+  const where = ["e.start_time BETWEEN ? AND ?"];
+  const args  = [start, `${end} 23:59:59`];
+
+  if (urgency !== "All") { where.push("e.urgency = ?"); args.push(urgency); }
+  if (status  !== "All") { where.push("h.event_status = ?"); args.push(status); }
+
+  const sql = `
+    SELECT
+      e.event_id,
+      e.event_name,
+      e.event_location,
+      e.urgency,
+      e.start_time,
+      e.end_time,
+      SUM(h.event_status='Upcoming') AS upcoming,
+      SUM(h.event_status='Attended') AS attended,
+      SUM(h.event_status='Missed')   AS missed,
+      SUM(h.event_status='Withdrew') AS withdrew,
+      SUM(COALESCE(h.hours_served,
+                   TIMESTAMPDIFF(MINUTE, e.start_time, e.end_time)/60.0)) AS hours,
+      AVG(NULLIF(h.rating,0)) AS avg_rating
+    FROM volunteer_history h
+    JOIN eventManage e ON e.event_id = h.event_id
+    WHERE ${where.join(" AND ")}
+    GROUP BY e.event_id
+    ORDER BY e.start_time
+  `;
+
+  try {
+    const [rows] = await db.query(sql, args);
+    res.json(rows);
+  } catch (err) {
+    console.error("activity by-event error:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+/* /reports/volunteer-activity/timeseries
+   Query: ?start=YYYY-MM-DD&end=YYYY-MM-DD&bucket=day|week&status=All|Attended|... */
+app.get("/reports/volunteer-activity/timeseries", async (req, res) => {
+  const { start, end, bucket = "day", status = "All" } = req.query;
+  if (!start || !end) return res.status(400).json({ message: "start & end required" });
+
+  const where = ["e.start_time BETWEEN ? AND ?"];
+  const args  = [start, `${end} 23:59:59`];
+  if (status !== "All") { where.push("h.event_status = ?"); args.push(status); }
+
+  const bucketExpr =
+    bucket === "week"
+      ? "DATE_FORMAT(e.start_time, '%x-%v')"  // ISO week
+      : "DATE(e.start_time)";
+
+  const sql = `
+    SELECT
+      ${bucketExpr} AS bucket,
+      COUNT(*) AS events,
+      SUM(h.event_status='Attended') AS attended,
+      SUM(h.event_status='Missed')   AS missed,
+      SUM(h.event_status='Withdrew') AS withdrew,
+      SUM(COALESCE(h.hours_served,
+                   TIMESTAMPDIFF(MINUTE, e.start_time, e.end_time)/60.0)) AS hours
+    FROM volunteer_history h
+    JOIN eventManage e ON e.event_id = h.event_id
+    WHERE ${where.join(" AND ")}
+    GROUP BY bucket
+    ORDER BY MIN(e.start_time)
+  `;
+
+  try {
+    const [rows] = await db.query(sql, args);
+    res.json(rows);
+  } catch (err) {
+    console.error("timeseries error:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+/* /reports/top-volunteers?start=YYYY-MM-DD&end=YYYY-MM-DD&limit=10 */
+app.get("/reports/top-volunteers", async (req, res) => {
+  const { start, end, limit = 10 } = req.query;
+  if (!start || !end) return res.status(400).json({ message: "start & end required" });
+
+  const sql = `
+    SELECT
+      l.id AS volunteer_id,
+      COALESCE(l.full_name,'(no name)') AS full_name,
+      COUNT(*) AS events,
+      SUM(COALESCE(h.hours_served,
+                   TIMESTAMPDIFF(MINUTE, e.start_time, e.end_time)/60.0)) AS hours
+    FROM volunteer_history h
+    JOIN eventManage e ON e.event_id = h.event_id
+    JOIN login l ON l.id = h.volunteer_id
+    WHERE e.start_time BETWEEN ? AND ?
+      AND h.event_status = 'Attended'
+    GROUP BY l.id, l.full_name
+    ORDER BY hours DESC, events DESC
+    LIMIT ?
+  `;
+  try {
+    const [rows] = await db.query(sql, [start, `${end} 23:59:59`, Number(limit)]);
+    res.json(rows);
+  } catch (err) {
+    console.error("top-volunteers error:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
 
 export default app;

@@ -131,6 +131,10 @@ app.post("/events", async (req, res) => {
      VALUES (?,?,?,?,?,?,?)`,
     [b.event_name,b.event_description,b.event_location,b.urgency,b.start_time,b.end_time,b.created_by]
   );
+
+  // ⬅️ persist skills
+  await replaceEventSkills(r.insertId, b.skills);
+
   res.status(201).json({ event_id: r.insertId });
 });
 
@@ -149,28 +153,80 @@ app.put("/events/:id", async (req, res) => {
       WHERE event_id=?`,
     [b.event_name,b.event_description,b.event_location,b.urgency,b.start_time,b.end_time,id]
   );
+
+  // ⬅️ replace skill links
+  await replaceEventSkills(id, b.skills);
+
   res.json({ message:"Event updated" });
 });
 
-/* delete */
-app.delete("/events/:id", async (req,res)=>{
-  await db.query("DELETE FROM eventManage WHERE event_id=?", [req.params.id]);
-  res.json({ message:"Event deleted" });
+
+app.delete("/events/:id", async (req, res) => {
+  const { id } = req.params;
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [reqRows] = await conn.query(
+      "SELECT request_id FROM event_volunteer_request WHERE event_id = ?",
+      [id]
+    );
+    if (reqRows.length) {
+      const reqIds = reqRows.map(r => r.request_id);
+      await conn.query(
+        `DELETE FROM volunteer_request_notification
+          WHERE request_id IN (${reqIds.map(() => "?").join(",")})`,
+        reqIds
+      );
+    }
+
+    await conn.query("DELETE FROM event_skill WHERE event_id=?", [id]);
+    await conn.query("DELETE FROM volunteer_history WHERE event_id=?", [id]);
+    await conn.query("DELETE FROM event_volunteer_request WHERE event_id=?", [id]);
+    await conn.query("DELETE FROM eventManage WHERE event_id=?", [id]);
+
+    await conn.commit();
+    res.json({ message: "Event deleted" });
+  } catch (err) {
+    await conn.rollback();
+    console.error("DELETE /events/:id", err.message);
+    res.status(500).json({ message: "Server error" });
+  } finally {
+    conn.release();
+  }
+});
+
+app.get("/events/by-id/:eventId", async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT e.*, GROUP_CONCAT(s.skill_name ORDER BY s.skill_name) AS required_skills
+         FROM eventManage e
+         LEFT JOIN event_skill es ON es.event_id = e.event_id
+         LEFT JOIN skill s       ON s.skill_id  = es.skill_id
+        WHERE e.event_id = ?
+        GROUP BY e.event_id`,
+      [req.params.eventId]
+    );
+    if (!rows.length) return res.status(404).json({ message: "Not found" });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error("/events/by-id:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
 });
 /** GET /events/:userId  – events created by / assigned to a user */
 app.get("/events/:userId", async (req, res) => {
   const { userId } = req.params;
   try {
-    const [rows] = await query(
-      `SELECT * FROM eventManage WHERE created_by = ?`,
-      [userId]
-    );
+    const [rows] = await query(`SELECT * FROM eventManage WHERE created_by = ?`, [userId]);
     res.json(rows);
   } catch (err) {
     console.error("Error fetching user events:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
+
+
 /* ──────────────────────────────────────────────────────────────
    VOLUNTEER MATCHING  (/api/match)
    ─────────────────────────────────────────────────────────── */
@@ -793,8 +849,6 @@ app.get("/vr-notifications/:volunteerId", async (req, res) => {
 /* ──────────────────────────────────────────────────────────────
    BULK volunteer-request  (Admin → many volunteers at once)
 ────────────────────────────────────────────────────────────── */
-/* POST /events/:eventId/requests/bulk
-   Body: { volunteerIds: [1,2,3], requestedBy: 7 } */
 app.post("/events/:eventId/requests/bulk", async (req, res) => {
   const { volunteerIds = [], requestedBy } = req.body;
   const { eventId } = req.params;
@@ -802,40 +856,46 @@ app.post("/events/:eventId/requests/bulk", async (req, res) => {
   if (!volunteerIds.length || !requestedBy)
     return res.status(400).json({ message: "volunteerIds[] & requestedBy required" });
 
-  /* drop duplicates just in case */
   const uniq = [...new Set(volunteerIds.map(Number))];
 
   try {
-    /* insert all requests in one query */
+    // 1) optional: prevent dup pairs (add a unique index in DB: UNIQUE(event_id,volunteer_id))
+    //    If you can't add the index yet, INSERT IGNORE is fine.
     const values = uniq.map((id) => `(${db.escape(eventId)},${db.escape(id)},${db.escape(requestedBy)})`).join(",");
     await db.query(
       `INSERT IGNORE INTO event_volunteer_request (event_id, volunteer_id, requested_by)
        VALUES ${values}`
     );
 
-    /* create matching notifications */
-    const notifVals = uniq
-      .map(
-        (id) =>
-          `(
-            LAST_INSERT_ID(),        -- same request_id FK
-            ${db.escape(id)},
-            ${db.escape(`You’ve been requested for event #${eventId}. Please accept or decline.`)}
-          )`
-      )
-      .join(",");
+    // 2) fetch fresh request_ids for those pairs
+    const [rows] = await db.query(
+      `SELECT request_id, volunteer_id
+         FROM event_volunteer_request
+        WHERE event_id = ?
+          AND volunteer_id IN (${uniq.map(() => "?").join(",")})`,
+      [eventId, ...uniq]
+    );
+
+    if (!rows.length) return res.status(201).json({ sent: 0 });
+
+    // 3) insert notifications using the fetched request_ids
+    const notifVals = rows.map(
+      (r) => `(${db.escape(r.request_id)}, ${db.escape(r.volunteer_id)},
+               ${db.escape(`You’ve been requested for event #${eventId}. Please accept or decline.`)})`
+    ).join(",");
+
     await db.query(
-      `INSERT INTO volunteer_request_notification
-         (request_id, volunteer_id, message)
+      `INSERT INTO volunteer_request_notification (request_id, volunteer_id, message)
        VALUES ${notifVals}`
     );
 
-    res.status(201).json({ sent: uniq.length });
+    res.status(201).json({ sent: rows.length });
   } catch (err) {
     console.error("POST /events/:eventId/requests/bulk →", err);
     res.status(500).json({ message: "Server error" });
   }
 });
+
 /* /reports/event-summary  — now supports ?status=Pending|Accepted|Declined */
 app.get("/reports/event-summary", async (req, res) => {
   const { start, end, urgency, status } = req.query;
@@ -1011,15 +1071,22 @@ app.get("/volunteer-dashboard/browse-events/:userId", async (req, res) => {
   }
 });
 
-/* GET /volunteer-dashboard/calendar/:userId */
 app.get("/volunteer-dashboard/calendar/:userId", async (req, res) => {
   const { userId } = req.params;
   try {
     const [rows] = await db.query(
-      `SELECT e.event_id, e.event_name, e.start_time, e.end_time
+      `SELECT e.event_id,
+              e.event_name,
+              e.event_location,
+              e.start_time,
+              e.end_time,
+              GROUP_CONCAT(s.skill_name ORDER BY s.skill_name) AS required_skills
          FROM volunteer_history h
-         JOIN eventManage e ON e.event_id = h.event_id
+         JOIN eventManage e    ON e.event_id = h.event_id
+         LEFT JOIN event_skill es ON es.event_id = e.event_id
+         LEFT JOIN skill s        ON s.skill_id = es.skill_id
         WHERE h.volunteer_id = ? AND h.event_status = 'Upcoming'
+        GROUP BY e.event_id
         ORDER BY e.start_time`,
       [userId]
     );
@@ -1029,6 +1096,8 @@ app.get("/volunteer-dashboard/calendar/:userId", async (req, res) => {
         title:    r.event_name,
         start:    r.start_time,
         end:      r.end_time,
+        event_location: r.event_location,
+        required_skills: r.required_skills
       }))
     });
   } catch (err) {
@@ -1036,6 +1105,7 @@ app.get("/volunteer-dashboard/calendar/:userId", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
 /* /reports/volunteer-activity  — grouped by volunteer
    Query: ?start=YYYY-MM-DD&end=YYYY-MM-DD&urgency=All|High|Medium|Low&status=All|Attended|Missed|Withdrew|Upcoming */
 // Volunteer Activity (grouped by volunteer)

@@ -1292,5 +1292,9 @@ app.get("/reports/top-volunteers", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
+// Simple server time endpoint (no caching)
+app.get("/time", (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json({ serverIso: new Date().toISOString() });
+});
 export default app;

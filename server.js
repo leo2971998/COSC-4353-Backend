@@ -38,7 +38,6 @@ const query = async (sql, params) => {
   const [results] = await db.execute(sql, params);
   return results;
 };
-/ ── Skill link helpers (place after `const query = ...`) ─────────────
 const ensureSkills = async (names = []) => {
   const list = Array.isArray(names) ? names : String(names || "").split(",");
   const ids = [];

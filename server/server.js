@@ -322,6 +322,187 @@ app.patch('/requests/:id', async (req, res) => {
    ADDITIONAL DIRECT ENDPOINTS (lookup tables, admin helpers, etc.)
    ─────────────────────────────────────────────────────────── */
 
+// Reports endpoints
+app.get("/reports/event-summary", async (req, res) => {
+  const { start, end, urgency, status } = req.query;
+  if (!start || !end) return res.status(400).json({ message: "start & end required" });
+
+  const where = ["e.start_time BETWEEN ? AND ?"];
+  const args  = [start, `${end} 23:59:59`];
+
+  if (urgency && urgency !== "All") {
+    where.push("e.urgency = ?");
+    args.push(urgency);
+  }
+
+  const sql = `
+    SELECT e.event_id,
+           e.event_name,
+           e.urgency,
+           e.event_location,
+           e.start_time,
+           e.end_time,
+           COUNT(r.request_id)                        AS total_requests,
+           SUM(r.status='Pending')   AS pending,
+           SUM(r.status='Accepted')  AS accepted,
+           SUM(r.status='Declined')  AS declined
+      FROM eventManage e
+      LEFT JOIN event_volunteer_request r ON r.event_id = e.event_id
+     WHERE ${where.join(" AND ")}
+     GROUP BY e.event_id
+     ${status && status !== "All" ? `HAVING ${status.toLowerCase()} > 0` : ""}
+     ORDER BY e.start_time
+  `;
+
+  try {
+    const [rows] = await db.query(sql, args);
+    res.json(rows);
+  } catch (err) {
+    console.error("event-summary error:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/reports/volunteer-activity", async (req, res) => {
+  const { start, end, urgency = "All", status = "All" } = req.query;
+  if (!start || !end) return res.status(400).json({ message: "start & end required" });
+
+  const where = ["e.start_time BETWEEN ? AND ?"];
+  const args  = [start, `${end} 23:59:59`];
+
+  if (urgency && urgency !== "All") { where.push("e.urgency = ?"); args.push(urgency); }
+  if (status  && status  !== "All") { where.push("h.event_status = ?"); args.push(status); }
+
+  const sql = `
+    SELECT
+      h.volunteer_id,
+      l.full_name,
+      COUNT(DISTINCT h.event_id) AS events,
+      SUM(
+        CASE WHEN e.start_time < NOW() AND e.end_time < NOW() 
+        THEN TIMESTAMPDIFF(HOUR, e.start_time, e.end_time) 
+        ELSE 0 END
+      ) AS hours
+    FROM volunteer_history h
+    JOIN login l ON l.id = h.volunteer_id
+    JOIN eventManage e ON e.event_id = h.event_id
+    WHERE ${where.join(" AND ")}
+    GROUP BY h.volunteer_id
+    ORDER BY events DESC, hours DESC
+  `;
+
+  try {
+    const [rows] = await db.query(sql, args);
+    res.json(rows);
+  } catch (err) {
+    console.error("volunteer-activity error:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/reports/volunteer-activity/by-event", async (req, res) => {
+  const { start, end, urgency = "All", status = "All" } = req.query;
+  if (!start || !end) return res.status(400).json({ message: "start & end required" });
+
+  const where = ["e.start_time BETWEEN ? AND ?"];
+  const args  = [start, `${end} 23:59:59`];
+
+  if (urgency && urgency !== "All") { where.push("e.urgency = ?"); args.push(urgency); }
+  if (status  && status  !== "All") { where.push("h.event_status = ?"); args.push(status); }
+
+  const sql = `
+    SELECT
+      e.event_id,
+      e.event_name,
+      e.event_location,
+      e.start_time,
+      e.urgency,
+      h.event_status,
+      COUNT(DISTINCT h.volunteer_id) AS volunteers,
+      TIMESTAMPDIFF(HOUR, e.start_time, e.end_time) AS event_hours
+    FROM eventManage e
+    JOIN volunteer_history h ON h.event_id = e.event_id
+    WHERE ${where.join(" AND ")}
+    GROUP BY e.event_id
+    ORDER BY e.start_time
+  `;
+
+  try {
+    const [rows] = await db.query(sql, args);
+    res.json(rows);
+  } catch (err) {
+    console.error("volunteer-activity/by-event error:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/reports/volunteer-activity/timeseries", async (req, res) => {
+  const { start, end, urgency = "All", status = "All" } = req.query;
+  if (!start || !end) return res.status(400).json({ message: "start & end required" });
+
+  const where = ["e.start_time BETWEEN ? AND ?"];
+  const args  = [start, `${end} 23:59:59`];
+
+  if (urgency && urgency !== "All") { where.push("e.urgency = ?"); args.push(urgency); }
+  if (status  && status  !== "All") { where.push("h.event_status = ?"); args.push(status); }
+
+  const sql = `
+    SELECT
+      DATE(e.start_time) AS event_date,
+      COUNT(DISTINCT h.volunteer_id) AS volunteers,
+      COUNT(DISTINCT e.event_id) AS events,
+      SUM(TIMESTAMPDIFF(HOUR, e.start_time, e.end_time)) AS total_hours
+    FROM eventManage e
+    JOIN volunteer_history h ON h.event_id = e.event_id
+    WHERE ${where.join(" AND ")}
+    GROUP BY DATE(e.start_time)
+    ORDER BY event_date
+  `;
+
+  try {
+    const [rows] = await db.query(sql, args);
+    res.json(rows);
+  } catch (err) {
+    console.error("volunteer-activity/timeseries error:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/reports/top-volunteers", async (req, res) => {
+  const { start, end, urgency = "All", limit = "10" } = req.query;
+  if (!start || !end) return res.status(400).json({ message: "start & end required" });
+
+  const where = ["e.start_time BETWEEN ? AND ?"];
+  const args  = [start, `${end} 23:59:59`];
+
+  if (urgency && urgency !== "All") { where.push("e.urgency = ?"); args.push(urgency); }
+
+  const sql = `
+    SELECT
+      h.volunteer_id,
+      l.full_name,
+      COUNT(DISTINCT h.event_id) AS events,
+      SUM(TIMESTAMPDIFF(HOUR, e.start_time, e.end_time)) AS total_hours
+    FROM volunteer_history h
+    JOIN login l ON l.id = h.volunteer_id
+    JOIN eventManage e ON e.event_id = h.event_id
+    WHERE ${where.join(" AND ")}
+      AND h.event_status IN ('Attended', 'Upcoming')
+    GROUP BY h.volunteer_id
+    ORDER BY total_hours DESC, events DESC
+    LIMIT ?
+  `;
+  args.push(parseInt(limit, 10));
+
+  try {
+    const [rows] = await db.query(sql, args);
+    res.json(rows);
+  } catch (err) {
+    console.error("top-volunteers error:", err.message);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 // Legacy suggested events endpoint (in-memory only)
 app.get("/suggested-events/:volunteerId", (req, res) => {
   const { volunteerId } = req.params;

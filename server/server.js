@@ -1,49 +1,49 @@
-import dotenv from 'dotenv';
-import express from 'express';
-import cors from 'cors';
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
 
-import db from './db.js';
-import eventRoutes from './routes/eventRoutes.js';
-import matchRoutes from './routes/match.js';
-import notificationRoutes from './routes/notifications.js';
-import historyRoutes from './routes/historyRoutes.js';
-import vDashRoutes from './routes/vDashRoutes.js';
+import "../config/db.js";
+
+import eventsRoutes from "./routes/events.js";
+import matchRoutes from "./routes/match.js";
+import notificationsRoutes from "./routes/notifications.js";
+import historyRoutes from "./routes/history.js";
+import dashboardRoutes from "./routes/dashboard.js";
+import suggestedEventsRoutes from "./routes/suggestedEvents.js";
+import authRoutes from "./routes/auth.js";
+import adminRoutes from "./routes/admin.js";
+import requestsRoutes from "./routes/requests.js";
+import reportsRoutes from "./routes/reports.js";
+import miscRoutes from "./routes/misc.js";
 
 dotenv.config();
 
 const app = express();
-const allowedOrigins = [
-  process.env.FRONTEND_URL || 'https://cosc-4353-project.vercel.app'
-];
 
-if (process.env.NODE_ENV !== 'production') {
-  allowedOrigins.push('http://localhost:3000');
-}
-
-app.use(cors({ origin: allowedOrigins }));
+const corsOptions = {
+  origin: process.env.FRONTEND_URL
+    ? process.env.FRONTEND_URL.split(",")
+    : ["http://localhost:3000", "https://cosc-4353-project.vercel.app"],
+};
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
 app.use((req, _res, next) => {
-  console.log(`${req.method} ${req.url}`);
+  console.log(`${req.method}  ${req.url}`); // eslint-disable-line no-console
   next();
 });
 
-// Authentication endpoints
-app.post('/register', (req, res) => {
-  res.status(201).json({ message: 'registered' });
-});
-app.post('/login', (req, res) => {
-  res.json({ token: 'fake-token' });
-});
-app.get('/profile', (req, res) => {
-  res.json({ user: null });
-});
-
-// Mount routes
-app.use(eventRoutes);
-app.use('/match', matchRoutes);
-app.use(notificationRoutes);
+app.use(eventsRoutes);
+app.use(matchRoutes);
+app.use(notificationsRoutes);
 app.use(historyRoutes);
-app.use('/dashboard', vDashRoutes);
+app.use(dashboardRoutes);
+app.use(suggestedEventsRoutes);
+app.use(authRoutes);
+app.use(adminRoutes);
+app.use(requestsRoutes);
+app.use(reportsRoutes);
+app.use(miscRoutes);
 
 export default app;

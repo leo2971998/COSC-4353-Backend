@@ -1,6 +1,6 @@
 import express from "express";
-import { addNotification } from "../utils/notifications.js";
-import { mockVolunteers, staticEvents } from "../memory.js";
+import { addNotification } from "../../utils/notifications.js";
+import { mockVolunteers, staticEvents } from "../../memory.js";
 
 const router = express.Router();
 

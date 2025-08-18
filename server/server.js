@@ -20,12 +20,23 @@ dotenv.config();
 
 const app = express();
 
-const corsOptions = {
-  origin: process.env.FRONTEND_URL
-    ? process.env.FRONTEND_URL.split(",")
-    : ["http://localhost:3000", "https://cosc-4353-project.vercel.app"],
-};
-app.use(cors(corsOptions));
+const allowedOrigins = [
+  'https://cosc-4353-project.vercel.app',
+  'http://localhost:3000',
+  'http://localhost:3001'
+];
+
+// Add environment variable if it exists
+if (process.env.FRONTEND_URL) {
+  allowedOrigins.push(process.env.FRONTEND_URL);
+}
+
+app.use(cors({ 
+  origin: allowedOrigins,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

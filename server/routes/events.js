@@ -1,7 +1,7 @@
 import express from "express";
-import { db, query } from "../config/db.js";
-import { replaceEventSkills } from "../utils/skills.js";
-import { getEventsMemory, setEventsMemory } from "../memory.js";
+import { db, query } from "../../config/db.js";
+import { replaceEventSkills } from "../../utils/skills.js";
+import { getEventsMemory, setEventsMemory } from "../../memory.js";
 
 const router = express.Router();
 
